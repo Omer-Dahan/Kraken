@@ -375,7 +375,7 @@ async def _fb_handle_callback(bot_client, event, chat_id, cq_data):
     if action == "domove":
         moved_name = posixpath.basename(session["selected"]) if session["selected"] else ""
         try:
-            file_browser.move_entry(MEDIA_ROOT, session["selected"], session["cwd"])
+            await asyncio.to_thread(file_browser.move_entry, MEDIA_ROOT, session["selected"], session["cwd"])
             session["mode"] = "browse"
             session["selected"] = None
             session["page"] = 0
