@@ -1,0 +1,8 @@
+# fast_download.py uses Telethon 1.x internals (_call/_get_dc/_connection/_init_request),
+# which Telethon 2.x reorganises - keep the major version pinned.
+telethon>=1.34,<2
+requests
+guessit
+rapidfuzz
+python-dotenv>=1.0,<2
+

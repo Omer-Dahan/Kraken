@@ -1,0 +1,31 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Telegram session data
+session/
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Local runtime files
+*.log
+logs/
+tmp/
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Project overview documentation
+SOFTWARE_OVERVIEW.md
+

@@ -1,0 +1,38 @@
+[Unit]
+Description=Kraken - Telegram command center for qBittorrent and Jellyfin
+Documentation=https://github.com/your-username/proxmox-tools
+# qBittorrent is not a hard dependency: Kraken starts fine without it and reports the
+# API as unreachable, so After= only orders the two, it does not require it.
+After=network-online.target qbittorrent.service
+Wants=network-online.target
+
+# An unauthorized Telethon session used to crash-loop this service forever. Give up
+# after 5 failures in 5 minutes so the failure is visible in `systemctl status`
+# instead of hiding in an endless restart cycle.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PROJECT_DIR__
+
+# The venv interpreter directly - no `source activate` needed, and it pins the service
+# to this project's dependencies regardless of what is installed system-wide.
+# -u keeps `journalctl -f` live instead of showing output in delayed chunks.
+ExecStart=__PROJECT_DIR__/.venv/bin/python -u __PROJECT_DIR__/src/telegram_bot.py
+
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=true
+# /usr and /boot read-only; the media root and the project directory stay writable.
+ProtectSystem=full
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kraken
+
+[Install]
+WantedBy=multi-user.target
