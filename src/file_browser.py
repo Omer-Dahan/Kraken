@@ -99,7 +99,12 @@ def make_dir(root, rel_dir, name):
         raise FileManagerError("תיקיית היעד לא קיימת.")
     _reject_collision(parent_abs, name)
     new_abs = os.path.join(parent_abs, name)
-    os.makedirs(new_abs)
+    try:
+        os.makedirs(new_abs)
+    except PermissionError:
+        raise FileManagerError("אין הרשאה ליצור תיקייה במיקום זה (Permission Denied).")
+    except OSError as e:
+        raise FileManagerError(f"שגיאה ביצירת התיקייה: {e.strerror or str(e)}")
     fix_permissions(new_abs)
     rel = _norm_rel(rel_dir)
     return f"{rel}/{name}" if rel else name
@@ -117,7 +122,12 @@ def rename_entry(root, rel_path, new_name):
     parent_abs = os.path.dirname(src_abs)
     _reject_collision(parent_abs, new_name)
     dest_abs = os.path.join(parent_abs, new_name)
-    os.rename(src_abs, dest_abs)
+    try:
+        os.rename(src_abs, dest_abs)
+    except PermissionError:
+        raise FileManagerError("אין הרשאה לשנות את שם הפריט במיקום זה (Permission Denied).")
+    except OSError as e:
+        raise FileManagerError(f"שגיאה בשינוי שם הפריט: {e.strerror or str(e)}")
     fix_permissions(dest_abs)
     parent_rel = rel.rsplit("/", 1)[0] if "/" in rel else ""
     return f"{parent_rel}/{new_name}" if parent_rel else new_name
@@ -136,10 +146,15 @@ def delete_entry(root, rel_path):
     if not os.path.exists(abs_path):
         raise FileManagerError("הפריט כבר לא קיים.")
     _require_within_root(root, abs_path)
-    if os.path.isdir(abs_path):
-        shutil.rmtree(abs_path)
-    else:
-        os.remove(abs_path)
+    try:
+        if os.path.isdir(abs_path):
+            shutil.rmtree(abs_path)
+        else:
+            os.remove(abs_path)
+    except PermissionError:
+        raise FileManagerError("אין הרשאת גישה (Permission Denied) למחיקת הפריט או קבציו המוכלים.")
+    except OSError as e:
+        raise FileManagerError(f"שגיאה במחיקת הפריט: {e.strerror or str(e)}")
 
 
 def move_entry(root, rel_src, rel_dest_dir):
@@ -164,7 +179,12 @@ def move_entry(root, rel_src, rel_dest_dir):
 
     _reject_collision(dest_dir_abs, name)
     dest_abs = os.path.join(dest_dir_abs, name)
-    shutil.move(src_abs, dest_abs)
+    try:
+        shutil.move(src_abs, dest_abs)
+    except PermissionError:
+        raise FileManagerError("אין הרשאת גישה (Permission Denied) להעברת הפריט או למחיקתו ממיקום המקור.")
+    except OSError as e:
+        raise FileManagerError(f"שגיאה בהעברת הפריט: {e.strerror or str(e)}")
     fix_permissions(dest_abs)
     rel_dest = _norm_rel(rel_dest_dir)
     return f"{rel_dest}/{name}" if rel_dest else name

@@ -54,6 +54,17 @@ echo "installed: $("$PROJECT_DIR/.venv/bin/python" --version)"
 step "Preparing runtime directories"
 mkdir -p "$PROJECT_DIR/session"
 
+MEDIA_ROOT="/media"
+STAGING_DIR="/media/.incoming"
+if [[ -f "$PROJECT_DIR/.env" ]]; then
+    ENV_MR="$(grep -E '^MEDIA_ROOT=' "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)"
+    ENV_SD="$(grep -E '^STAGING_DIR=' "$PROJECT_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)"
+    [[ -n "$ENV_MR" ]] && MEDIA_ROOT="$ENV_MR"
+    [[ -n "$ENV_SD" ]] && STAGING_DIR="$ENV_SD"
+fi
+
+mkdir -p "$MEDIA_ROOT" "$STAGING_DIR" "$MEDIA_ROOT/movies" "$MEDIA_ROOT/tv"
+
 # Migrate anything left over from the old flat /opt layout. Moved, not copied, so the
 # next run does not keep resurrecting a stale session file from a path nothing reads.
 if [[ -d /opt/session && "$PROJECT_DIR" != "/opt" ]]; then
@@ -81,6 +92,12 @@ step "Setting ownership and permissions"
 chown -R "$SERVICE_USER:$SERVICE_GROUP" "$PROJECT_DIR"
 chmod 600 "$PROJECT_DIR/.env"
 chmod 700 "$PROJECT_DIR/session"
+
+# Set ownership and group-writable permissions on media and staging directories
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$STAGING_DIR" 2>/dev/null || true
+chmod 775 "$MEDIA_ROOT" "$STAGING_DIR" 2>/dev/null || true
+if [[ -d "$MEDIA_ROOT/tv" ]]; then chmod -R 775 "$MEDIA_ROOT/tv" 2>/dev/null || true; fi
+if [[ -d "$MEDIA_ROOT/movies" ]]; then chmod -R 775 "$MEDIA_ROOT/movies" 2>/dev/null || true; fi
 
 step "Installing $SERVICE_NAME"
 sed -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \

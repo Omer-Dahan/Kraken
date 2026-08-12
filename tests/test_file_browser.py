@@ -13,6 +13,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import file_browser as fb
 
@@ -272,6 +273,34 @@ class Listing(LibraryTestCase):
 
     def test_a_missing_directory_lists_as_empty_rather_than_raising(self):
         self.assertEqual(fb.list_entries(self.abs("nope")), ([], []))
+
+
+class PermissionErrorHandling(LibraryTestCase):
+    """Verifies that filesystem permission errors are caught and converted to user-friendly FileManagerErrors."""
+
+    @patch("shutil.move", side_effect=PermissionError("Permission denied"))
+    def test_move_entry_permission_denied(self, mock_move):
+        with self.assertRaises(fb.FileManagerError) as ctx:
+            fb.move_entry(self.root, "movies/Dune (2021)", "tv")
+        self.assertIn("Permission Denied", str(ctx.exception))
+
+    @patch("shutil.rmtree", side_effect=PermissionError("Permission denied"))
+    def test_delete_entry_permission_denied(self, mock_rmtree):
+        with self.assertRaises(fb.FileManagerError) as ctx:
+            fb.delete_entry(self.root, "movies/Dune (2021)")
+        self.assertIn("Permission Denied", str(ctx.exception))
+
+    @patch("os.rename", side_effect=PermissionError("Permission denied"))
+    def test_rename_entry_permission_denied(self, mock_rename):
+        with self.assertRaises(fb.FileManagerError) as ctx:
+            fb.rename_entry(self.root, "movies/Dune (2021)", "Dune (2021) 4K")
+        self.assertIn("Permission Denied", str(ctx.exception))
+
+    @patch("os.makedirs", side_effect=PermissionError("Permission denied"))
+    def test_make_dir_permission_denied(self, mock_makedirs):
+        with self.assertRaises(fb.FileManagerError) as ctx:
+            fb.make_dir(self.root, "movies", "New Folder")
+        self.assertIn("Permission Denied", str(ctx.exception))
 
 
 if __name__ == "__main__":
