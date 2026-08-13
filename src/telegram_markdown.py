@@ -43,6 +43,13 @@ _PATTERN = re.compile(
     "|".join(f"(?P<g{i}>{re.escape(marker)})" for i, (marker, _) in enumerate(_DELIMITERS))
 )
 
+# An underscore wedged between two word characters is part of a name, not italics.
+# Release filenames are full of them ("לולו_סרטים_בלייד_ראנר_2049_1080P.mkv"), and treating
+# those as delimiters paired them up, swallowed every underscore and ran the words together.
+# Only `_` is restricted this way: * ~ ` do not show up mid-word in filenames, and applying
+# the same rule to them would break the deliberate "*{count} קבצים*" spans that hug digits.
+_WORD = re.compile(r"\w", re.UNICODE)
+
 
 def parse(message):
     """Turns Telegram-flavoured markdown into (stripped_text, entities) for Telethon."""
@@ -63,10 +70,19 @@ def parse(message):
         marker = match.group()
         entity_cls = dict(_DELIMITERS)[marker]
         body_start = match.end()
+
         end = message.find(marker, body_start)
-        # An unmatched marker, or an empty `**`, is ordinary punctuation - a lone
-        # asterisk in a release name must not swallow the rest of the message.
-        if end == -1 or end == body_start:
+        if entity_cls is MessageEntityItalic:
+            # Walk past closing candidates that are themselves mid-word, so "_(ריק)_" still
+            # closes correctly even when a filename's underscores appear later in the line.
+            while end != -1 and _is_intra_word(message, end):
+                end = message.find(marker, end + len(marker))
+
+        # An unmatched marker, an empty `**`, or a mid-word underscore is ordinary text -
+        # a lone asterisk in a release name must not swallow the rest of the message.
+        if end == -1 or end == body_start or (
+            entity_cls is MessageEntityItalic and _is_intra_word(message, match.start())
+        ):
             text.append(message[pos:body_start])
             offset += _utf16_len(message[pos:body_start])
             pos = body_start
@@ -119,6 +135,13 @@ def unparse(text, entities):
         index = _char_index(result, index)
         result = result[:index] + marker + result[index:]
     return result
+
+
+def _is_intra_word(message, index):
+    """True when the character at `index` has a word character on both sides."""
+    if index == 0 or index + 1 >= len(message):
+        return False
+    return bool(_WORD.match(message[index - 1]) and _WORD.match(message[index + 1]))
 
 
 def _utf16_len(text):

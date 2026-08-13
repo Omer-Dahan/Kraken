@@ -107,6 +107,54 @@ class MarkersThatAreNotFormatting(unittest.TestCase):
         self.assertEqual(entities, [])
 
 
+class UnderscoresInFilenames(unittest.TestCase):
+    """Release names are underscore-separated, and italics must not eat the separators.
+
+    The first version of this parser paired those underscores up, consumed every one of
+    them and ran the words together, so a delete confirmation showed a name that looked
+    like it had never had spaces at all.
+    """
+
+    NAME = "לולו_סרטים_בלייד_ראנר_2049_2017_ת_מ_1080P.mkv"
+
+    def test_a_filename_keeps_every_underscore(self):
+        text, entities = md.parse(f"🗑 *{self.NAME}* נמחק לצמיתות.")
+        self.assertIn(self.NAME, text)
+        self.assertEqual(text.count("_"), self.NAME.count("_"))
+        self.assertEqual(kinds(entities), ["MessageEntityBold"])
+
+    def test_no_italic_is_invented_inside_a_name(self):
+        _, entities = md.parse(f"🗑 *{self.NAME}* נמחק.")
+        self.assertNotIn("MessageEntityItalic", kinds(entities))
+
+    def test_an_ascii_release_name_is_untouched(self):
+        text, entities = md.parse("The.Office_S03E01_1080p.mkv")
+        self.assertEqual(text, "The.Office_S03E01_1080p.mkv")
+        self.assertEqual(entities, [])
+
+    def test_deliberate_italics_still_work(self):
+        """The two real uses in the UI - both wrap a parenthesised phrase, not a word."""
+        for source, expected in [
+            ("_(תיקייה ריקה)_", "(תיקייה ריקה)"),
+            ("_(אין טורנטים בקטגוריה הזו)_", "(אין טורנטים בקטגוריה הזו)"),
+        ]:
+            with self.subTest(source=source):
+                text, entities = md.parse(source)
+                self.assertEqual(text, expected)
+                self.assertEqual(kinds(entities), ["MessageEntityItalic"])
+
+    def test_italics_survive_a_filename_later_in_the_message(self):
+        """The closing marker has to skip past the name's underscores to find its pair."""
+        text, entities = md.parse(f"_(ריק)_ ואז {self.NAME}")
+        self.assertEqual(kinds(entities), ["MessageEntityItalic"])
+        self.assertTrue(text.endswith(self.NAME))
+
+    def test_a_trailing_underscore_is_not_a_delimiter(self):
+        text, entities = md.parse("file_name_")
+        self.assertEqual(text, "file_name_")
+        self.assertEqual(entities, [])
+
+
 class RoundTrip(unittest.TestCase):
     """Telethon calls unparse when it reads a message back out of a Message object."""
 
