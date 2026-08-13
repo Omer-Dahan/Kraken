@@ -19,7 +19,7 @@ def main_menu_text(mode="movies"):
     label, path = DESTINATIONS.get(mode, DESTINATIONS["movies"])
     return (
         "👋 *בוט ההורדות של Jellyfin*\n"
-        f"🎯 יעד נוכחי: {label} — `{path}`\n\n"
+        f"🎯 יעד נוכחי: {label} - `{path}`\n\n"
         "שלחו קישור או קובץ להורדה, או בחרו פעולה:"
     )
 

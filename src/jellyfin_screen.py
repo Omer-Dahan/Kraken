@@ -117,13 +117,13 @@ def _format_session(s):
     device = s.get("DeviceName") or s.get("Client") or "?"
     now_playing = s.get("NowPlayingItem")
     if not now_playing:
-        return f"• *{user}* ({device}) — לא מנגן כרגע"
+        return f"• *{user}* ({device}) - לא מנגן כרגע"
 
     name = now_playing.get("Name") or "?"
     season, episode = now_playing.get("ParentIndexNumber"), now_playing.get("IndexNumber")
     if now_playing.get("SeriesName"):
         marker = f" S{season:02d}E{episode:02d}" if season is not None and episode is not None else ""
-        name = f"{now_playing['SeriesName']}{marker} — {name}"
+        name = f"{now_playing['SeriesName']}{marker} - {name}"
 
     # Jellyfin reports durations and positions in ticks (100-nanosecond units).
     runtime = (now_playing.get("RunTimeTicks") or 0) // 10_000_000

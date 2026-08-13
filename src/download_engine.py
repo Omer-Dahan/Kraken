@@ -47,7 +47,7 @@ class ProgressTracker:
             return ""
         if self.hit_premium_limit:
             return (
-                f"\n⚠️ *טלגרם מאיט את ההורדה* — החשבון אינו Premium "
+                f"\n⚠️ *טלגרם מאיט את ההורדה* - החשבון אינו Premium "
                 f"(המתנה מצטברת: {int(self.throttled_seconds)} שניות)"
             )
         return f"\n⚠️ *הגבלת קצב זמנית מטלגרם* (המתנה מצטברת: {int(self.throttled_seconds)} שניות)"
