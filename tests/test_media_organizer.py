@@ -157,6 +157,56 @@ class NameCleaning(unittest.TestCase):
         self.assertEqual(sanitize_file_name("The.Office.S03E01.1080p.mkv"), "The.Office.S03E01.1080p.mkv")
 
 
+class BidiMarkStripping(unittest.TestCase):
+    """Telegram puts bidi controls in Hebrew captions to force display order.
+
+    Python's \\s does not match them, so they used to reach the filesystem and make a
+    perfectly spaced Hebrew name render as one glued-up word. Every range the regex
+    covers is asserted here, because the characters are invisible in the source and a
+    well-meaning cleanup of them would empty the class without failing anything else.
+    """
+
+    HEBREW = "לולו סרטים"  # "לולו סרטים"
+
+    def test_each_control_range_is_stripped(self):
+        for char, name in [
+            ("​", "ZERO WIDTH SPACE"),
+            ("‌", "ZERO WIDTH NON-JOINER"),
+            ("‍", "ZERO WIDTH JOINER"),
+            ("‎", "LEFT-TO-RIGHT MARK"),
+            ("‏", "RIGHT-TO-LEFT MARK"),
+            ("‫", "RIGHT-TO-LEFT EMBEDDING"),
+            ("‮", "RIGHT-TO-LEFT OVERRIDE"),
+            ("⁦", "LEFT-TO-RIGHT ISOLATE"),
+            ("⁩", "POP DIRECTIONAL ISOLATE"),
+            ("﻿", "ZERO WIDTH NO-BREAK SPACE"),
+        ]:
+            with self.subTest(char=name):
+                self.assertEqual(clean_name(f"a{char}b"), "ab")
+
+    def test_the_real_filename_from_the_bug_report(self):
+        """A mark between every word is what made the name look like one long word."""
+        glued = "‏".join(["לולו", "סרטים", "2049.mkv"])
+        self.assertEqual(clean_name(glued), "לולוסרטים2049.mkv")
+
+    def test_a_mark_next_to_a_real_space_does_not_double_it(self):
+        """The mark usually sits beside a space, so stripping must not leave two."""
+        self.assertEqual(clean_name(f"{self.HEBREW}‏ 2049"), f"{self.HEBREW} 2049")
+        self.assertEqual(clean_name(f"‏{self.HEBREW} ‏2049"), f"{self.HEBREW} 2049")
+
+    def test_real_spaces_are_still_preserved(self):
+        self.assertEqual(clean_name(self.HEBREW), self.HEBREW)
+
+    def test_a_name_of_nothing_but_marks_leaves_nothing(self):
+        self.assertEqual(clean_name("‏‎‫﻿"), "")
+
+    def test_a_leading_mark_cannot_hide_a_traversal(self):
+        """A stripped mark must not reveal a separator that then escapes the directory."""
+        cleaned = sanitize_file_name("‏../‏payload.mkv")
+        self.assertNotIn("/", cleaned)
+        self.assertNotIn("\\", cleaned)
+
+
 class IncomingMediaClassification(unittest.TestCase):
     """Which Telegram media is library material. Everything here except the videos used
     to be filed under /media as a fabricated .mp4."""

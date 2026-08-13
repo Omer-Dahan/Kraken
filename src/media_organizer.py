@@ -10,6 +10,25 @@ from guessit import guessit
 from rapidfuzz import fuzz, process
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Bidi controls and zero-width characters, which Telegram sprinkles through Hebrew
+# captions to force display order. Python's \s matches none of them, so before this they
+# survived clean_name, went into the real filename, and made the words look glued
+# together: a Hebrew name displaying as one long word is usually real spaces plus RTL
+# marks, not missing spaces. They are dropped rather than replaced with a space, since a
+# mark sits beside a real space and converting would double every gap.
+#
+# WARNING: the character class below contains the literal control characters, which your
+# editor will not render. Do not "tidy up" the invisible characters out of it - that empties
+# the class silently and the bug comes straight back. test_media_organizer covers each range.
+_BIDI_AND_ZERO_WIDTH = re.compile(
+    "["
+    r"​-‏"   # zero-width space/non-joiner/joiner, LRM, RLM
+    r"‪-‮"   # LRE, RLE, PDF, LRO, RLO
+    r"⁦-⁩"   # LRI, RLI, FSI, PDI
+    r"﻿"          # zero-width no-break space (BOM)
+    "]"
+)
 _WHITESPACE = re.compile(r"\s+")
 
 # Matches literal season markers in names (e.g. S03, S01E02, Season 4, 3x07, עונה 2)
@@ -85,6 +104,9 @@ def parse_media_name(filename_or_title):
 def clean_name(name):
     """Strips invalid or awkward characters from filesystem names."""
     cleaned = _INVALID_CHARS.sub("", name or "")
+    # Bidi marks go before the whitespace collapse: dropping one can leave two spaces
+    # adjacent ("word RLM SPACE word"), which the collapse below then folds back into one.
+    cleaned = _BIDI_AND_ZERO_WIDTH.sub("", cleaned)
     return _WHITESPACE.sub(" ", cleaned).strip(" .")
 
 
