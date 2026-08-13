@@ -56,6 +56,7 @@ Kraken queues downloads, predicts target library folders, triggers Jellyfin scan
 **Operations & Reference**
 - [📂 File Browser](#-file-browser)
 - [⚙️ Deploying to the Server](#-deploying-to-the-server)
+- [🔑 Shared Media Permissions](#-shared-media-permissions)
 - [🧱 Project Structure](#-project-structure)
 - [🔧 Configuration Matrix](#-configuration-matrix)
 
@@ -258,7 +259,8 @@ Follow the interactive prompts to enter your phone number and 2FA code. A `sessi
 - 🤖 Telegram Bot Token & API Credentials
 - 🧲 **qBittorrent** with Web UI enabled
 - 🍿 **Jellyfin Server** *(optional, for library refresh & watch links)*
-- 💾 Shared Media Directory (`/media`) accessible by Kraken, qBittorrent, and Jellyfin
+- 💾 Shared Media Directory (`/media`) writable by Kraken, qBittorrent, and Jellyfin
+  - via a common group, see [Shared Media Permissions](#-shared-media-permissions)
 
 </details>
 
@@ -391,8 +393,14 @@ Kraken is designed for simple, self-contained server deployment using `systemd`.
 2. **Run the Installer**:
    ```bash
    ssh vm@192.168.1.231
-   sudo bash /opt/Kraken/deploy/install.sh
+
+   # One-time: the group shared with qBittorrent and Jellyfin (see Shared Media Permissions)
+   sudo groupadd -f media
+
+   sudo MEDIA_GROUP=media bash /opt/Kraken/deploy/install.sh
    ```
+   > `MEDIA_GROUP` goes **before** `bash`, not after. Omit it and the installer falls back to
+   > the service user's own group, which is only correct if qBittorrent runs as that same user.
 
 3. **Configure & Start**:
    ```bash
@@ -409,6 +417,53 @@ Kraken is designed for simple, self-contained server deployment using `systemd`.
 
 > [!IMPORTANT]
 > The installer script (`deploy/install.sh`) is **idempotent**. Re-run it safely after every code update. It will never overwrite your existing `.env` or session data.
+
+### 🔑 Shared Media Permissions
+
+Kraken is not the only writer in the media directory. qBittorrent finishes a torrent **as its
+own user**, and Kraken then has to move, rename and delete that file. If the two run as
+different users, deletes fail with `Permission Denied` - and Kraken cannot chmod its way out,
+because Linux only lets a file's *owner* (or root) change its mode.
+
+The fix is a **shared group** rather than shared ownership:
+
+```bash
+# 1 · Create the group and put Kraken's service user in it
+sudo groupadd -f media
+sudo usermod -aG media vm
+
+# 2 · Put qBittorrent's user in it too (check the name first)
+ps -o user= -C qbittorrent-nox
+sudo usermod -aG media <that-user>
+sudo systemctl restart qbittorrent
+
+# 3 · Re-run the installer so it applies group + setgid to the library
+sudo MEDIA_GROUP=media bash /opt/Kraken/deploy/install.sh
+```
+
+The installer sets `2775` on the library directories. The leading `2` is the **setgid** bit:
+every file created there afterwards inherits the `media` group automatically, instead of the
+creating process's primary group. That is what stops the problem from returning on each new
+download, rather than fixing it once.
+
+Set qBittorrent's umask to `002` as well (Options → Downloads → *Run external program*, or
+`UMask=0002` in its systemd unit). Without it, files arrive without group-write permission and
+setgid alone is not enough.
+
+**Verify it worked:**
+
+```bash
+ls -ld /media/movies     # expect: drwxrwsr-x ... media
+id vm                    # expect: 'media' among the groups
+```
+
+The `s` in ``drwxrwsr-x`` is the setgid bit. If it is there and both users are in the group,
+Kraken can manage anything qBittorrent creates.
+
+> [!NOTE]
+> The installer never takes ownership of files that already exist - adopting another service's
+> files is not its call. It counts them and prints the exact `chgrp` command to run if any are
+> found. Files predating this setup may need that one-time fixup.
 
 ---
 
@@ -481,6 +536,21 @@ Kraken/
 | `SIMILARITY_MENTION_THRESHOLD` | Matcher | RapidFuzz folder matching confidence % threshold | `75` |
 | `FB_PAGE_SIZE` | UI | Items per page in Telegram File Browser | `10` |
 | `TORRENTS_PAGE_SIZE` | UI | Items per page in Torrent Dashboard | `6` |
+
+### Installer Variables
+
+Passed on the `install.sh` command line, **not** in `.env` - they configure the systemd unit and
+filesystem permissions at install time, and the running bot never reads them.
+
+| Variable | Description | Default |
+|:---|:---|:---|
+| `SERVICE_USER` | System user the service runs as | `vm` |
+| `SERVICE_GROUP` | Primary group of the service user | Same as `SERVICE_USER` |
+| `MEDIA_GROUP` | Shared group owning the media library - see [Shared Media Permissions](#-shared-media-permissions) | Same as `SERVICE_GROUP` |
+
+```bash
+sudo SERVICE_USER=vm MEDIA_GROUP=media bash /opt/Kraken/deploy/install.sh
+```
 
 ---
 
