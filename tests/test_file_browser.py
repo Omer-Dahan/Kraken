@@ -275,6 +275,36 @@ class Listing(LibraryTestCase):
         self.assertEqual(fb.list_entries(self.abs("nope")), ([], []))
 
 
+class ReadOnlyDeletion(LibraryTestCase):
+    """Deleting media a torrent client left read-only, which is the common real-world case.
+
+    Both halves of delete_entry get their own retry path (rmtree's handler, os.remove's
+    except clause), so both are exercised here rather than trusting one to cover the other.
+    """
+
+    def test_a_read_only_file_is_still_deleted(self):
+        path = self.write("movies", "Dune (2021)", "readonly.mkv")
+        os.chmod(path, 0o444)
+        fb.delete_entry(self.root, "movies/Dune (2021)/readonly.mkv")
+        self.assertFalse(os.path.exists(path))
+
+    def test_a_folder_of_read_only_files_is_still_deleted(self):
+        folder = self.abs("tv", "The Office", "Season 03")
+        os.chmod(self.write("tv", "The Office", "Season 03", "S03E02.mkv"), 0o444)
+        os.chmod(self.abs("tv", "The Office", "Season 03", "S03E01.mkv"), 0o444)
+        os.chmod(folder, 0o555)
+        fb.delete_entry(self.root, "tv/The Office/Season 03")
+        self.assertFalse(os.path.exists(folder))
+
+    def test_a_denial_that_chmod_cannot_lift_still_reaches_the_user(self):
+        """The retry is a recovery attempt, not a way to swallow a genuine failure."""
+        with patch("file_browser._grant_write"), \
+             patch("os.remove", side_effect=PermissionError("Permission denied")):
+            with self.assertRaises(fb.FileManagerError) as ctx:
+                fb.delete_entry(self.root, "movies/Dune (2021)/Dune.mkv")
+        self.assertIn("Permission Denied", str(ctx.exception))
+
+
 class PermissionErrorHandling(LibraryTestCase):
     """Verifies that filesystem permission errors are caught and converted to user-friendly FileManagerErrors."""
 

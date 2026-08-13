@@ -72,15 +72,20 @@ class DownloadTabs(unittest.TestCase):
             with self.subTest(tab=key):
                 self.assertTrue(any(text.endswith(f" {count}") for text in shown))
 
-    def test_a_full_strip_splits_evenly_instead_of_stranding_one_tab(self):
-        rows = _tab_rows({"active": 2, "waiting": 1, "completed": 12, "error": 1, "queue": 4}, "queue")
-        self.assertEqual([len(row) for row in rows], [3, 2])
+    def test_four_tabs_become_a_two_by_two_grid(self):
+        rows = _tab_rows({"active": 2, "waiting": 1, "completed": 12, "queue": 4}, "active")
+        self.assertEqual([len(row) for row in rows], [2, 2])
 
-    def test_no_row_is_ever_wider_than_four(self):
+    def test_no_row_is_ever_wider_than_two(self):
         for selected in ("active", "queue", "error"):
             counts = {"active": 1, "waiting": 1, "completed": 1, "error": 1, "queue": 1}
             with self.subTest(selected=selected):
-                self.assertLessEqual(max(len(row) for row in _tab_rows(counts, selected)), 4)
+                self.assertLessEqual(max(len(row) for row in _tab_rows(counts, selected)), 2)
+
+    def test_every_tab_survives_the_split(self):
+        counts = {"active": 1, "waiting": 1, "completed": 1, "error": 1, "queue": 1}
+        rows = _tab_rows(counts, "active")
+        self.assertEqual(sum(len(row) for row in rows), 5)
 
 
 if __name__ == "__main__":

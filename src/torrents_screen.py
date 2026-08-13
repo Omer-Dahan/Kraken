@@ -149,13 +149,11 @@ def _tab_rows(counts, selected):
         text = f"{label} {count}"
         tabs.append(Button.inline(f"▶ {text}" if key == selected else text, data=f"tor:filter:{key}"))
 
-    # Three tabs minimum (the core ones are never hidden), five at most. Four across is as
-    # narrow as a Hebrew word plus a number stays readable on a phone, and a fifth splits down
-    # the middle - 3+2 rather than stranding it alone under a full row.
-    if len(tabs) > 4:
-        half = -(-len(tabs) // 2)
-        return [tabs[:half], tabs[half:]]
-    return [tabs]
+    # Two across, never more. Telegram divides a row's width equally, so a four-tab strip
+    # squeezed each Hebrew label plus its count into a quarter of a phone screen and let it
+    # clip. Pairs give every tab half a row, which the longest label ("תור טלגרם 12") fits
+    # comfortably. An odd count leaves the last tab alone on its own full-width row.
+    return [tabs[i:i + 2] for i in range(0, len(tabs), 2)]
 
 
 async def _tor_render_list(bot_client, chat_id, status_line=None):
@@ -206,7 +204,7 @@ async def _tor_render_list(bot_client, chat_id, status_line=None):
             pct = round((t.get("progress") or 0) * 100, 1)
             pause_hint = "⏸ " if t.get("state") in _PAUSED_STATES else ""
             label = (
-                f"{pause_hint}🎬 {short_name} — {pct}% "
+                f"{pause_hint}🎬 {short_name} - {pct}% "
                 f"⬇️{_format_speed(t.get('dlspeed'))} ⏱{_format_eta(t.get('eta'))} 🌱{t.get('num_seeds', 0)}"
             )
             rows.append([Button.inline(label, data=f"tor:card:{_tor_short_hash(t.get('hash'))}")])
@@ -220,7 +218,7 @@ async def _tor_render_list(bot_client, chat_id, status_line=None):
             if page_row:
                 rows.append(page_row)
 
-        body = f"📥 *הורדות — {TORRENT_FILTER_LABELS[bucket]}* ({len(filtered)})"
+        body = f"📥 *הורדות - {TORRENT_FILTER_LABELS[bucket]}* ({len(filtered)})"
         if not filtered:
             body += "\n_(אין טורנטים בקטגוריה הזו)_"
 

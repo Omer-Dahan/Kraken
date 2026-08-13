@@ -7,6 +7,8 @@ Provides safe path validation and name collision checks independent of Telethon.
 import os
 import posixpath
 import shutil
+import stat
+import sys
 
 from media_organizer import clean_name, fix_permissions
 
@@ -133,6 +135,42 @@ def rename_entry(root, rel_path, new_name):
     return f"{parent_rel}/{new_name}" if parent_rel else new_name
 
 
+def _grant_write_and_retry(func, path, exc):
+    """rmtree error handler: re-tries `func` once after making `path` (and its parent) writable.
+
+    A read-only file can't be unlinked while its *parent* denies write, and a read-only
+    directory can neither be listed nor emptied - which is exactly how a torrent client
+    that drops 0o444 media on us breaks a delete. Both bits are opened before the retry.
+    Anything that still fails is re-raised for the caller's except clauses to translate.
+    """
+    if not isinstance(exc, PermissionError):
+        raise exc
+    _grant_write(os.path.dirname(path))
+    _grant_write(path)
+    func(path)
+
+
+def _grant_write(path):
+    """Best-effort chmod u+w on a single path; silent when the ownership isn't ours to change."""
+    try:
+        os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+    except OSError:
+        pass
+
+
+def _rmtree_forcing_writable(abs_path):
+    """shutil.rmtree with the permission-recovery handler, under either handler API.
+
+    `onerror` was deprecated in 3.12 in favour of `onexc`, which passes the exception
+    itself rather than the sys.exc_info() triple. The bot runs on whatever python3 the
+    host provides, so both spellings have to work.
+    """
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(abs_path, onexc=_grant_write_and_retry)
+    else:
+        shutil.rmtree(abs_path, onerror=lambda func, path, info: _grant_write_and_retry(func, path, info[1]))
+
+
 def delete_entry(root, rel_path):
     """
     Permanently deletes the file/folder at rel_path (relative to root).
@@ -148,9 +186,16 @@ def delete_entry(root, rel_path):
     _require_within_root(root, abs_path)
     try:
         if os.path.isdir(abs_path):
-            shutil.rmtree(abs_path)
+            _rmtree_forcing_writable(abs_path)
         else:
-            os.remove(abs_path)
+            try:
+                os.remove(abs_path)
+            except PermissionError:
+                # Same read-only case as above, minus the walk: the write bit lives on the
+                # containing directory, so that is what gets opened before the second try.
+                _grant_write(os.path.dirname(abs_path))
+                _grant_write(abs_path)
+                os.remove(abs_path)
     except PermissionError:
         raise FileManagerError("אין הרשאת גישה (Permission Denied) למחיקת הפריט או קבציו המוכלים.")
     except OSError as e:

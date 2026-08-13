@@ -13,6 +13,7 @@ import tempfile
 from telethon import TelegramClient, events, errors
 from telethon.sessions import StringSession
 
+import telegram_markdown
 from fast_download import premium_connection_count
 from media_organizer import parse_media_name, build_target_dir, fix_permissions, sanitize_file_name
 
@@ -153,6 +154,9 @@ async def main():
     os.makedirs(SESSION_DIR, exist_ok=True)
     bot_session_path = os.path.join(SESSION_DIR, "bot_session")
     bot_client = TelegramClient(bot_session_path, API_ID, API_HASH, entity_cache_limit=500)
+    # Every screen is written in Telegram's markdown flavour (*bold*), not the CommonMark
+    # one Telethon ships with - see telegram_markdown for why the parser moved, not the text.
+    bot_client.parse_mode = telegram_markdown
     logging.info("Starting Telegram Bot Client...")
     await bot_client.start(bot_token=BOT_TOKEN)
     bot_info = await bot_client.get_me()
