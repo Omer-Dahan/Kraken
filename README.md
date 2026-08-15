@@ -384,16 +384,21 @@ Kraken is designed for simple, self-contained server deployment using `systemd`.
 
 ### Deployment Steps
 
-1. **Sync Files to Server**:
+Run step 1 from your workstation and step 2 onward on the server. `$KRAKEN_HOST` is whatever
+you use to reach it (`user@host`, or an SSH config alias):
+
+```bash
+KRAKEN_HOST=user@your-server
+```
+
+1. **Sync the source to the server**, excluding anything host-specific:
    ```bash
    rsync -av --delete --exclude '.venv' --exclude '.env' --exclude 'session' \
-         ./ vm@your-server:/opt/Kraken/
+         ./ "$KRAKEN_HOST:/opt/Kraken/"
    ```
 
-2. **Run the Installer**:
+2. **On the server, run the installer**:
    ```bash
-   ssh vm@your-server
-
    # One-time: the group shared with qBittorrent and Jellyfin (see Shared Media Permissions)
    sudo groupadd -f media
 
@@ -407,7 +412,7 @@ Kraken is designed for simple, self-contained server deployment using `systemd`.
    # Fill in credentials on initial setup
    nano /opt/Kraken/.env
 
-   # Optionally generate Userbot session
+   # Optionally generate Userbot session (as SERVICE_USER, 'vm' by default)
    sudo -u vm /opt/Kraken/.venv/bin/python /opt/Kraken/src/generate_session.py
 
    # Start service
