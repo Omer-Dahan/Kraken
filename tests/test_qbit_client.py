@@ -13,7 +13,7 @@ import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
-from qbit_client import is_in_staging, add_torrent_to_qbit, qbit_get_torrents
+from qbit_client import is_in_staging, add_torrent_to_qbit, qbit_get_torrents, torrent_owner
 
 
 def _mock_session(**response_attrs):
@@ -91,6 +91,23 @@ class ResponseParsing(unittest.TestCase):
         """requests raising is the unreachable-host case, not a bad status code."""
         with patch("qbit_client._get_http_session", side_effect=OSError("connection refused")):
             self.assertIsNone(asyncio.run(qbit_get_torrents("all")))
+
+
+class TorrentOwner(unittest.TestCase):
+    def test_the_sender_is_read_back_from_its_tag(self):
+        self.assertEqual(torrent_owner({"tags": "movies, kraken-chat-555"}), 555)
+        self.assertEqual(torrent_owner({"tags": "kraken-chat--100123"}), -100123)
+
+    def test_untagged_or_foreign_tags_have_no_owner(self):
+        for torrent in ({}, {"tags": ""}, {"tags": "movies"}, {"tags": "kraken-chat-abc"}):
+            with self.subTest(torrent=torrent):
+                self.assertIsNone(torrent_owner(torrent))
+
+    def test_the_sender_is_tagged_when_the_torrent_is_added(self):
+        patcher, session = _mock_session(status_code=200, text="Ok.")
+        with patcher:
+            asyncio.run(add_torrent_to_qbit(urls="magnet:?xt=urn:btih:abc", save_path="/s", chat_id=42))
+        self.assertEqual(session.post.call_args.kwargs["data"]["tags"], "kraken-chat-42")
 
 
 if __name__ == "__main__":

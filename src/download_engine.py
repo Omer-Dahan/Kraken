@@ -20,6 +20,12 @@ import bot_state as state
 import jellyfin_client as jf
 from bot_config import QUIET_GROUP_SIZE, DOWNLOAD_QUEUE_CONCURRENCY, BOT_QUEUE_CONCURRENCY
 
+# Target paths some worker is writing right now. The "already exists" check alone can't
+# stop two queued files with the same name: both pass it before either has created its
+# file, then write into the same path at once - and whichever fails first deletes the
+# other's partial file on its way out.
+_paths_in_flight = set()
+
 
 class ProgressTracker:
     """Helper class to track and display live file download progress in Telegram."""
@@ -321,7 +327,25 @@ async def start_video_download(bot_client, user_client, message, chat_id, target
         else:
             logging.warning(f"Collision: {target_file_path} already exists, skipping download.")
         return False
+    if target_file_path in _paths_in_flight:
+        busy_text = f"⚠️ קובץ בשם `{file_name}` כבר יורד עכשיו ל-`{target_dir}` - העותק הזה דולג."
+        if notify:
+            await bot_client.send_message(chat_id, busy_text)
+        else:
+            logging.warning(f"Collision: {target_file_path} is already being downloaded, skipping.")
+        return False
 
+    # Claimed with no await since the checks above, so no other worker can slip in between.
+    _paths_in_flight.add(target_file_path)
+    try:
+        return await _download_to_path(
+            bot_client, user_client, message, chat_id, target_dir, file_name, target_file_path, notify, primary
+        )
+    finally:
+        _paths_in_flight.discard(target_file_path)
+
+
+async def _download_to_path(bot_client, user_client, message, chat_id, target_dir, file_name, target_file_path, notify, primary):
     status_msg = None
     if notify:
         status_msg = await bot_client.send_message(chat_id, f"⏳ מתחיל הורדת קובץ *{file_name}* ל-`{target_dir}`...")

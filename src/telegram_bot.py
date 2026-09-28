@@ -5,7 +5,6 @@ Wires up Bot/Userbot Telegram clients and handles top-level commands/events.
 """
 
 import os
-import time
 import asyncio
 import logging
 import tempfile
@@ -22,16 +21,19 @@ from bot_config import (
     API_ID, API_HASH, BOT_TOKEN, SESSION_STRING, SESSION_PATH, BASE_DIR, SESSION_DIR,
     ALLOWED_USER_IDS, MEDIA_ROOT, STAGING_DIR, DOWNLOAD_CONNECTIONS, NON_PREMIUM_CONNECTIONS,
 )
-from keyboards import get_main_keyboard, send_menu_anchor, show_main_menu, main_menu_text, DESTINATIONS
+from keyboards import (
+    get_main_keyboard, send_menu_anchor, send_menu_when_idle, show_main_menu, main_menu_text, DESTINATIONS,
+)
 from qbit_client import (
     add_torrent_to_qbit, qbit_set_location, qbit_delete_torrent,
     check_completed_torrents, _torrent_lock,
 )
 from download_engine import link_bot_and_userbot, start_download_workers, enqueue_group_downloads
 from confirmation_flow import (
-    _set_awaiting_text, _clear_awaiting_text, _handle_rename_reply, _add_to_batch,
+    _set_awaiting_text, _clear_awaiting_text, _drop_awaiting_text, _handle_rename_reply, _add_to_batch,
     send_confirmation, adjust_season, flip_base, item_season,
-    accept_ignore_suggestion, learn_from_confirmation,
+    accept_ignore_suggestion, learn_from_confirmation, folder_exists,
+    open_folder_picker, rename_prompt, pick_existing_folder,
 )
 import learned_names
 from file_manager_ui import _fb_open, _fb_handle_callback, _fb_handle_rename_text, _fb_handle_mkdir_text
@@ -160,7 +162,7 @@ async def _handle_ignore_command(bot_client, chat_id, text):
             logging.error(f"Could not save the ignore list: {e}")
             reply = "❌ שגיאה בשמירת הרשימה."
 
-    await send_menu_anchor(bot_client, chat_id, reply)
+    await send_menu_when_idle(bot_client, chat_id, reply)
 
 
 async def maintenance_loop():
@@ -365,6 +367,43 @@ async def main():
                     await event.answer(f"עונה {season}" if season is not None else "")
                 await send_confirmation(bot_client, chat_id, pending_id)
 
+            elif cq_data.startswith(("rename_back:", "pick:", "pickpage:", "pickbase:")):
+                # The ✏️ screen's own buttons. Like flip/season, none of them finalizes the
+                # action, so it's only looked up here, never claimed.
+                kind, _, rest = cq_data.partition(":")
+                pending_id, _, arg = rest.partition(":")
+                action = state.pending_actions.get(pending_id)
+                if not action:
+                    await event.answer("⚠️ הפעולה כבר לא זמינה (אולי כבר טופלה).", alert=True)
+                    return
+                if action.get("chat_id") != chat_id:
+                    await event.answer("⛔ אין לך הרשאה לבצע פעולה זו.", alert=True)
+                    return
+                if kind in ("pickpage", "pickbase"):
+                    if kind == "pickbase":
+                        current = action.get("pick_base", action["base"])
+                        open_folder_picker(action, "movies" if current == "tv" else "tv")
+                    elif "folder_choices" not in action:
+                        open_folder_picker(action)
+                    await event.answer()
+                    text, buttons = rename_prompt(pending_id, action, int(arg) if arg.isdigit() else 0)
+                    await event.edit(text, buttons=buttons)
+                    return
+
+                if kind == "pick":
+                    folder = pick_existing_folder(action, int(arg) if arg.isdigit() else -1)
+                    if not folder:
+                        await event.answer("⚠️ התיקייה הזו כבר לא קיימת, מרענן.", alert=True)
+                        open_folder_picker(action, action.get("pick_base"))
+                        text, buttons = rename_prompt(pending_id, action)
+                        await event.edit(text, buttons=buttons)
+                        return
+                    await event.answer(f"📂 {folder}")
+                else:
+                    await event.answer()
+                _clear_awaiting_text(chat_id, pending_id)
+                await send_confirmation(bot_client, chat_id, pending_id)
+
             elif cq_data.startswith(("confirm:", "use_existing:", "rename:", "cancel:")):
                 action_type, _, pending_id = cq_data.partition(":")
 
@@ -380,7 +419,9 @@ async def main():
                         return
                     await _set_awaiting_text(bot_client, chat_id, "rename", pending_id)
                     await event.answer()
-                    await event.edit(f"✏️ שלח/י הודעת טקסט עם השם החדש עבור *{action['folder']}*.")
+                    open_folder_picker(action)
+                    text, buttons = rename_prompt(pending_id, action)
+                    await event.edit(text, buttons=buttons)
                     return
 
                 # cancel / confirm / use_existing all finalize the pending action, so claim it by
@@ -415,29 +456,47 @@ async def main():
                         await event.edit(f"❌ בוטל. הטורנט *{action['name']}* נמחק מ-qBittorrent.")
                     else:
                         await event.edit(f"❌ בוטל. {len(action['items'])} קבצים לא יורדו.")
-                    await send_menu_anchor(bot_client, chat_id)
+                    await send_menu_when_idle(bot_client, chat_id)
                     return
 
                 # confirm / use_existing
                 folder = action["candidate"] if (action_type == "use_existing" and action["candidate"]) else action["folder"]
                 learn_from_confirmation(action, folder)
+                existing_note = " (תיקייה קיימת)" if folder_exists(action["base"], folder) else ""
 
                 if action["type"] == "torrent":
                     await event.answer("מאשר...")
                     target_dir = build_target_dir(MEDIA_ROOT, action["base"], folder, action.get("season"))
-                    os.makedirs(target_dir, exist_ok=True)
+                    # A failure here used to leave the action popped and the torrent parked in
+                    # staging for good - watch_staged_torrents never re-offers a hash it has
+                    # already asked about. Putting the action back keeps the same buttons
+                    # working, so fixing the cause and tapping again is enough.
+                    try:
+                        os.makedirs(target_dir, exist_ok=True)
+                    except OSError as e:
+                        logging.error(f"Could not create {target_dir} for torrent {action['hash']}: {e}")
+                        state.pending_actions[pending_id] = action
+                        await send_confirmation(
+                            bot_client, chat_id, pending_id,
+                            status_line=f"❌ לא ניתן ליצור את `{target_dir}` ({e.strerror or e}). אפשר לנסות שוב.",
+                        )
+                        return
                     fix_permissions(target_dir)
                     # Locked against the torrents-screen delete handler, which targets the
                     # same qBittorrent hash - see _torrent_lock for why the pending_actions pop
                     # above isn't enough on its own to prevent a delete-with-files racing this
                     # relocate and wiping the files this call is about to organize.
                     async with _torrent_lock(action["hash"]):
-                        if await qbit_set_location(action["hash"], target_dir):
-                            await event.edit(f"✅ הטורנט *{action['name']}* יוצב ב-`{target_dir}`.")
-                        else:
-                            await event.edit(f"❌ שגיאה בהעברת הטורנט ל-`{target_dir}`.")
+                        moved = await qbit_set_location(action["hash"], target_dir)
+                    if not moved:
+                        state.pending_actions[pending_id] = action
+                        await send_confirmation(
+                            bot_client, chat_id, pending_id,
+                            status_line=f"❌ qBittorrent לא העביר את הטורנט ל-`{target_dir}`. אפשר לנסות שוב.",
+                        )
+                        return
+                    await event.edit(f"✅ הטורנט *{action['name']}* יוצב ב-`{target_dir}`{existing_note}.")
                 else:
-                    # #15: Build targets BEFORE await event.answer so no race window exists
                     targets = [
                         (item["message"],
                          build_target_dir(MEDIA_ROOT, action["base"], folder, item_season(action, item["parsed"])),
@@ -445,14 +504,18 @@ async def main():
                         for item in action["items"]
                     ]
                     target_dir_display = build_target_dir(MEDIA_ROOT, action["base"], folder, action.get("season"))
-                    await event.answer("מאשר...")
-                    await event.edit(f"✅ {len(targets)} קבצים נוספו לתור ההורדה, יעד: `{target_dir_display}`")
-                    # #16: Pass the actual folder chosen (which may be action["candidate"])
+                    # Queued before anything that awaits: the action is already popped, so if the
+                    # answer or the edit below failed first (a FloodWait, say), these files would
+                    # never download and nothing on screen would say so. `folder` may be the
+                    # existing candidate the user picked rather than the proposed name.
                     enqueue_group_downloads(bot_client, user_client, chat_id, folder, targets)
+                    await event.answer("מאשר...")
+                    await event.edit(f"✅ {len(targets)} קבצים נוספו לתור ההורדה, יעד: `{target_dir_display}`{existing_note}")
 
                 # The confirmation message stays where it is (edited into its own result), so
-                # the refreshed menu goes to the bottom of the chat where the user is looking.
-                await send_menu_anchor(bot_client, chat_id)
+                # the refreshed menu goes to the bottom of the chat where the user is looking -
+                # unless another confirmation from the same burst is still open.
+                await send_menu_when_idle(bot_client, chat_id)
 
             else:
                 # A button from a menu drawn by an older version - the standalone status and
@@ -518,13 +581,13 @@ async def main():
         # media. A file arriving while a text prompt is open must fall through to the
         # normal batching logic below instead of being silently swallowed as "the reply".
         awaiting = state.awaiting_text_input.get(chat_id)
-        if awaiting and not event.message.media:
+        if awaiting and event.message.file is None:
             if text.startswith("/"):
                 # A slash-command typed while a rename/mkdir prompt is open almost
                 # certainly means the user wants the command, not to name something
                 # "/status" - drop the pending prompt and fall through to normal command
                 # handling below instead of consuming it as the literal new name.
-                state.awaiting_text_input.pop(chat_id, None)
+                await _drop_awaiting_text(bot_client, chat_id)
             else:
                 state.awaiting_text_input.pop(chat_id, None)
                 if text:
@@ -540,7 +603,72 @@ async def main():
                 return
 
         current_mode = state.user_modes.get(chat_id, "movies")
-        target_path = f"/media/{current_mode}"
+        target_path = DESTINATIONS[current_mode][1]
+
+        # Files first, before the text is read as a command or a link: a caption belongs to
+        # its file. Checked the other way round, a forwarded video captioned with a channel's
+        # "https://t.me/..." went to qBittorrent as a torrent URL and the video was dropped.
+        # `file` rather than `media`, which is also set on a plain link's web-page preview.
+        if event.message.file is not None:
+            # DocumentAttributeFilename is whatever the sender put there, and this value
+            # is later joined onto a target directory - so it is reduced to a bare name,
+            # with no separators and no "..", the moment it enters the bot.
+            file_name = sanitize_file_name(getattr(event.message.file, "name", None))
+
+            if file_name.lower().endswith(".torrent"):
+                # mkstemp rather than a timestamped name under /tmp: two .torrent files
+                # sent in the same second used to land on the same path, and the name
+                # itself no longer has any say in where the file is written.
+                temp_fd, temp_torrent_path = tempfile.mkstemp(suffix=".torrent")
+                os.close(temp_fd)
+                try:
+                    await bot_client.download_media(event.message, file=temp_torrent_path)
+                    os.makedirs(STAGING_DIR, exist_ok=True)
+                    if await add_torrent_to_qbit(torrent_file_path=temp_torrent_path, save_path=STAGING_DIR, chat_id=chat_id):
+                        await send_menu_when_idle(
+                            bot_client, chat_id,
+                            f"📥 *קובץ הטורנט `{file_name}` נשלח ל-qBittorrent.*\nממתין למידע על התוכן כדי להציע תיקייה מתאימה..."
+                        )
+                    else:
+                        await send_menu_when_idle(bot_client, chat_id, "❌ שגיאה בשליחת קובץ הטורנט ל-qBittorrent.")
+                except Exception as e:
+                    logging.error(f"Error downloading or processing torrent file: {e}")
+                    await send_menu_when_idle(bot_client, chat_id, "❌ שגיאה בהורדת קובץ הטורנט.")
+                finally:
+                    if os.path.exists(temp_torrent_path):
+                        os.remove(temp_torrent_path)
+                return
+
+            # Direct Video / Large Document Download (ANY SIZE up to 4GB!) - buffered into
+            # a batch so a burst of files gets organized as one unit (see confirmation_flow._add_to_batch).
+            if is_library_media(
+                file_name,
+                getattr(event.message.file, "mime_type", "") or "",
+                has_document=getattr(event.message, "document", None) is not None,
+                is_sticker=getattr(event.message, "sticker", None) is not None,
+            ):
+                if not file_name:
+                    # Named by message id, not by the clock: an album of unnamed videos all
+                    # lands in the same second, and they used to share one filename.
+                    file_name = f"telegram_video_{event.message.id}.mp4"
+
+                parsed = parse_media_name(file_name)
+                await _add_to_batch(bot_client, user_client, chat_id, event.message, file_name, parsed, target_path)
+                return
+
+            # A photo, a subtitle file, a zip... used to get no answer at all when sent
+            # without a caption, which looks exactly like the bot being down.
+            await send_menu_when_idle(
+                bot_client, chat_id,
+                "⚠️ סוג הקובץ הזה לא נתמך. שלח קובץ וידאו, קובץ `.torrent` או קישור Magnet."
+            )
+            return
+
+        # In a group Telegram sends commands as "/menu@BotName" - drop the mention so they
+        # match the same as in a private chat.
+        if text.startswith("/"):
+            head, sep, rest = text.partition(" ")
+            text = head.split("@", 1)[0] + sep + rest
 
         # Commands. Anything that answers with the main keyboard goes through send_menu_anchor,
         # which drops the reply at the bottom of the chat and clears the previous menu - see
@@ -590,64 +718,18 @@ async def main():
         # Magnet Links
         if text.startswith("magnet:") or text.startswith("http://") or text.startswith("https://"):
             os.makedirs(STAGING_DIR, exist_ok=True)
-            if await add_torrent_to_qbit(urls=text, save_path=STAGING_DIR):
-                await send_menu_anchor(
+            if await add_torrent_to_qbit(urls=text, save_path=STAGING_DIR, chat_id=chat_id):
+                await send_menu_when_idle(
                     bot_client, chat_id,
                     "📥 *הקישור נשלח ל-qBittorrent.*\nממתין למידע (metadata) על התוכן כדי להציע תיקייה מתאימה..."
                 )
             else:
-                await send_menu_anchor(bot_client, chat_id, "❌ שגיאה בשליחת הטורנט ל-qBittorrent.")
+                await send_menu_when_idle(bot_client, chat_id, "❌ שגיאה בשליחת הטורנט ל-qBittorrent.")
             return
-
-        # Check for media (Documents / Videos / Torrent files)
-        if event.message.media:
-            # DocumentAttributeFilename is whatever the sender put there, and this value
-            # is later joined onto a target directory - so it is reduced to a bare name,
-            # with no separators and no "..", the moment it enters the bot.
-            file_name = sanitize_file_name(getattr(event.message.file, "name", None))
-
-            if file_name.endswith(".torrent"):
-                # mkstemp rather than a timestamped name under /tmp: two .torrent files
-                # sent in the same second used to land on the same path, and the name
-                # itself no longer has any say in where the file is written.
-                temp_fd, temp_torrent_path = tempfile.mkstemp(suffix=".torrent")
-                os.close(temp_fd)
-                try:
-                    await bot_client.download_media(event.message, file=temp_torrent_path)
-                    os.makedirs(STAGING_DIR, exist_ok=True)
-                    if await add_torrent_to_qbit(torrent_file_path=temp_torrent_path, save_path=STAGING_DIR):
-                        await send_menu_anchor(
-                            bot_client, chat_id,
-                            f"📥 *קובץ הטורנט `{file_name}` נשלח ל-qBittorrent.*\nממתין למידע על התוכן כדי להציע תיקייה מתאימה..."
-                        )
-                    else:
-                        await send_menu_anchor(bot_client, chat_id, "❌ שגיאה בשליחת קובץ הטורנט ל-qBittorrent.")
-                except Exception as e:
-                    logging.error(f"Error downloading or processing torrent file: {e}")
-                    await send_menu_anchor(bot_client, chat_id, "❌ שגיאה בהורדת קובץ הטורנט.")
-                finally:
-                    if os.path.exists(temp_torrent_path):
-                        os.remove(temp_torrent_path)
-                return
-
-            # Direct Video / Large Document Download (ANY SIZE up to 4GB!) - buffered into
-            # a batch so a burst of files gets organized as one unit (see confirmation_flow._add_to_batch).
-            if is_library_media(
-                file_name,
-                getattr(event.message.file, "mime_type", "") or "",
-                has_document=getattr(event.message, "document", None) is not None,
-                is_sticker=getattr(event.message, "sticker", None) is not None,
-            ):
-                if not file_name:
-                    file_name = f"telegram_video_{int(time.time())}.mp4"
-
-                parsed = parse_media_name(file_name)
-                await _add_to_batch(bot_client, user_client, chat_id, event.message, file_name, parsed, target_path)
-                return
 
         # Fallback for unrecognized plain text messages
         if text:
-            await send_menu_anchor(
+            await send_menu_when_idle(
                 bot_client, chat_id,
                 "💡 שלח קישור Magnet, קובץ `.torrent`, או קובץ וידאו.\nלהצגת התפריט לחץ /menu."
             )

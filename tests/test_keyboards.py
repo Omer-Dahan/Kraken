@@ -4,10 +4,12 @@ decided by code rather than written out literally. Run from the Kraken directory
     python -m unittest discover -s tests -t .
 """
 
+import asyncio
 import unittest
+from unittest import mock
 
 import bot_state as state
-from keyboards import get_main_keyboard
+from keyboards import get_main_keyboard, send_menu_when_idle
 from torrents_screen import _tab_rows
 
 
@@ -86,6 +88,39 @@ class DownloadTabs(unittest.TestCase):
         counts = {"active": 1, "waiting": 1, "completed": 1, "error": 1, "queue": 1}
         rows = _tab_rows(counts, "active")
         self.assertEqual(sum(len(row) for row in rows), 5)
+
+
+class MenuWhileWaiting(unittest.TestCase):
+    """The menu the bot sends on its own stays away while a question is still open."""
+
+    def setUp(self):
+        self.bot = mock.MagicMock()
+        self.bot.send_message = mock.AsyncMock(return_value=mock.Mock(id=5))
+        self.bot.delete_messages = mock.AsyncMock()
+        for d in (state.pending_actions, state.awaiting_text_input, state.menu_anchors):
+            self.addCleanup(d.clear)
+
+    def sent_buttons(self):
+        return self.bot.send_message.await_args.kwargs.get("buttons")
+
+    def test_no_menu_under_an_open_confirmation(self):
+        state.pending_actions["aaa"] = {"chat_id": 1}
+        state.menu_anchors[1] = 4
+        asyncio.run(send_menu_when_idle(self.bot, 1))
+        self.bot.send_message.assert_not_awaited()
+        self.bot.delete_messages.assert_awaited_once_with(1, 4)
+
+    def test_no_menu_while_a_name_is_being_typed_but_the_text_still_goes_out(self):
+        state.awaiting_text_input[1] = {"kind": "rename", "target": "aaa"}
+        asyncio.run(send_menu_when_idle(self.bot, 1, "📥 הקישור נשלח"))
+        self.bot.send_message.assert_awaited_once()
+        self.assertIsNone(self.sent_buttons())
+
+    def test_another_chats_confirmation_does_not_hold_this_one_back(self):
+        state.pending_actions["aaa"] = {"chat_id": 2}
+        asyncio.run(send_menu_when_idle(self.bot, 1))
+        self.assertIsNotNone(self.sent_buttons())
+        self.assertEqual(state.menu_anchors[1], 5)
 
 
 if __name__ == "__main__":

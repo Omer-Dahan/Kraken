@@ -15,7 +15,7 @@ from telethon.tl.types import KeyboardButtonUrl
 import bot_state as state
 import jellyfin_client as jf
 import keyboards
-from confirmation_flow import _set_awaiting_text
+from confirmation_flow import _set_awaiting_text, _clear_awaiting_kind
 
 # Jellyfin item ids are 32-char hex, so "jf:item:<id>" is 40 bytes - comfortably inside
 # Telegram's 64-byte callback_data cap, which is why items are addressed by id here rather
@@ -282,6 +282,8 @@ async def _jf_handle_callback(bot_client, event, chat_id, cq_data):
         return
 
     if action == "menu":
+        # Also the ↩️ on the search prompt - the typed query it was waiting for is off.
+        _clear_awaiting_kind(chat_id, "jf_search")
         await event.answer()
         await _jf_render_menu(bot_client, chat_id)
         return
@@ -307,7 +309,10 @@ async def _jf_handle_callback(bot_client, event, chat_id, cq_data):
     if action == "search":
         await event.answer()
         await _set_awaiting_text(bot_client, chat_id, "jf_search", session["msg_id"])
-        await bot_client.edit_message(chat_id, session["msg_id"], "🔍 שלח/י שם של סרט או סדרה לחיפוש ב-Jellyfin.")
+        await bot_client.edit_message(
+            chat_id, session["msg_id"], "🔍 שלח/י שם של סרט או סדרה לחיפוש ב-Jellyfin.",
+            buttons=[[Button.inline("↩️ חזרה", data="jf:menu")]],
+        )
         return
 
     if action == "item":

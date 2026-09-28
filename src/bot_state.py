@@ -9,8 +9,14 @@ being set once the hybrid link is established in download_engine.py, or
 """
 
 import asyncio
+import logging
+import time
 
-from bot_config import DOWNLOAD_CONNECTIONS
+from bot_config import BASE_DIR, DOWNLOAD_CONNECTIONS
+
+# How many downloads were still queued when the process last stopped, so the next start
+# can tell the user which files have to be sent again.
+QUEUE_COUNT_PATH = BASE_DIR / ".queue_count"
 
 # State management
 user_modes = {}  # chat_id -> "movies" or "tv"
@@ -81,39 +87,40 @@ def create_background_task(coro):
 
 
 def record_queue_count():
-    """Writes the current count of queued downloads to a local disk file."""
+    """Writes the current count of queued downloads to a local disk file.
+
+    This used to call os.remove without importing os, and the bare `except: pass` hid the
+    NameError - so the file was never removed once the queue drained, and every restart
+    after any download warned that "1 file" had been lost from the queue.
+    """
     try:
-        from bot_config import BASE_DIR
-        path = BASE_DIR / ".queue_count"
         count = len(queued_downloads)
         if count > 0:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(str(count))
-        elif path.exists():
-            os.remove(path)
-    except Exception:
-        pass
+            QUEUE_COUNT_PATH.write_text(str(count), encoding="utf-8")
+        else:
+            QUEUE_COUNT_PATH.unlink(missing_ok=True)
+    except OSError as e:
+        logging.warning(f"Could not record the download queue size: {e}")
 
 
 def pop_persisted_queue_count():
     """Reads and removes the persisted queue count from disk. Returns 0 if none existed."""
-    import os
     try:
-        from bot_config import BASE_DIR
-        path = BASE_DIR / ".queue_count"
-        if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                val = int(f.read().strip() or "0")
-            os.remove(path)
-            return val
-    except Exception:
-        pass
-    return 0
+        raw = QUEUE_COUNT_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return 0
+    except OSError as e:
+        logging.warning(f"Could not read the persisted queue size: {e}")
+        return 0
+    try:
+        QUEUE_COUNT_PATH.unlink(missing_ok=True)
+    except OSError as e:
+        logging.warning(f"Could not remove the persisted queue size: {e}")
+    return int(raw) if raw.isdigit() else 0
 
 
 def clean_stale_state():
     """Prunes old pending actions, idle UI sessions, stale text prompts, and bounds unauthorized users set."""
-    import time
     now = time.time()
 
     # 1. Prune pending actions older than 24 hours (86400 seconds) - safely copy list to prevent iteration mutation errors

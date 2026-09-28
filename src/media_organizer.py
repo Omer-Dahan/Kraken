@@ -127,7 +127,7 @@ def _first(value):
     return value
 
 
-def parse_media_name(filename_or_title):
+def parse_media_name(filename_or_title, apply_aliases=True):
     """
     Parses a filename (or bare title) into normalized media info.
 
@@ -137,6 +137,9 @@ def parse_media_name(filename_or_title):
 
     A title the user has corrected before (see learned_names) comes back as the corrected one;
     `detected_title` keeps what the name itself said, which is what a new correction is keyed on.
+    The correction is skipped when the name carries a different year than it does: "Dune"
+    corrected to "Dune Part Two (2024)" says nothing about a file named "Dune 1984".
+    `apply_aliases=False` is for names that are already folder names in the library.
     """
     memory = learned_names.memory
     name = strip_release_noise(filename_or_title, memory.ignore_words())
@@ -171,10 +174,11 @@ def parse_media_name(filename_or_title):
         kind = "unknown"
 
     title = detected_title = title.strip()
-    alias = memory.alias_for(detected_title)
+    alias = memory.alias_for(detected_title) if apply_aliases else None
     if alias:
-        title, alias_year = alias
-        year = alias_year if alias_year is not None else year
+        alias_title, alias_year = alias
+        if not (year and alias_year and year != alias_year):
+            title, year = alias_title, alias_year or year
 
     return {
         "kind": kind,
@@ -234,7 +238,10 @@ def find_exact_existing(base_dir, title, year=None):
     for name in os.listdir(base_dir):
         if not os.path.isdir(os.path.join(base_dir, name)):
             continue
-        existing = parse_media_name(name)
+        # Folder names are already what the user chose. Running them through the learned
+        # aliases re-titled existing folders ("House (2004)" read as whatever "House" was
+        # once corrected to), and new files got auto-filed into the wrong show.
+        existing = parse_media_name(name, apply_aliases=False)
         if (existing.get("title") or "").strip().lower() != target:
             continue
         existing_year = existing.get("year")

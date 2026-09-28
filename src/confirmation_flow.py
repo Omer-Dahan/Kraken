@@ -30,6 +30,12 @@ from download_engine import enqueue_group_downloads
 MIN_SEASON = 0
 MAX_SEASON = 99
 
+# The longest Telegram rate limit a first-time confirmation send will sit out before retrying.
+FLOOD_RETRY_MAX_SECONDS = 60
+
+# How many existing folders the ✏️ screen lists per page.
+FOLDER_PICK_PAGE_SIZE = 8
+
 
 def _new_pending_action(action_type, chat_id, base, folder, parsed, **extra):
     """Registers a pending torrent folder-confirmation action and returns its short id."""
@@ -194,6 +200,19 @@ def _season_line(action):
     return f"\n🔢 עונות {seasons[0]}-{seasons[-1]} (כל קובץ לפי שמו)"
 
 
+def folder_exists(base, folder):
+    """Whether confirming would file into a folder already in the library, not create one."""
+    return os.path.isdir(os.path.join(MEDIA_ROOT, base, folder))
+
+
+def _existing_folder_line(action):
+    # Without this the confirmation read "create" even when the name matched a folder that
+    # was already there, so nothing said the files would join it.
+    if not folder_exists(action["base"], action["folder"]):
+        return ""
+    return "\n📂 התיקייה הזו כבר קיימת בספרייה - התוכן יתווסף אליה, לא תיווצר חדשה."
+
+
 def _confirmation_text(action):
     base_label = "📺 סדרה" if action["base"] == "tv" else "🎬 סרט"
     season_line = _season_line(action)
@@ -202,7 +221,10 @@ def _confirmation_text(action):
         episode = action["parsed"].get("episode")
         if season_line and episode:
             season_line += f" · פרק {episode}"
-        text = f"{base_label} זוהתה: *{action['folder']}*{season_line}\n📁 יעד מוצע: `{_target_display(action)}`"
+        text = (
+            f"{base_label} זוהתה: *{action['folder']}*{season_line}\n"
+            f"📁 יעד מוצע: `{_target_display(action)}`{_existing_folder_line(action)}"
+        )
         if _has_worthwhile_candidate(action):
             text += f"\n📂 נמצאה תיקייה קיימת דומה ({action['candidate_score']}%): `{action['candidate']}`"
         return text
@@ -217,7 +239,7 @@ def _confirmation_text(action):
 
     text = (
         f"{base_label} זוהתה: *{action['folder']}* ({count} קבצים){season_line}\n"
-        f"📁 יעד מוצע: `{_target_display(action)}`\n{names_block}"
+        f"📁 יעד מוצע: `{_target_display(action)}`{_existing_folder_line(action)}\n{names_block}"
     )
     if _has_worthwhile_candidate(action):
         text += f"\n📂 נמצאה תיקייה קיימת דומה ({action['candidate_score']}%): `{action['candidate']}`"
@@ -226,7 +248,11 @@ def _confirmation_text(action):
 
 def _confirmation_buttons(pending_id, action):
     count = len(action["items"]) if action["type"] == "video_group" else 1
-    confirm_label = f'✅ אשר {count} קבצים: "{action["folder"]}"' if count > 1 else f'✅ צור: "{action["folder"]}"'
+    folder = action["folder"]
+    if folder_exists(action["base"], folder):
+        confirm_label = f'✅ {count} קבצים לתיקייה הקיימת "{folder}"' if count > 1 else f'✅ לתיקייה הקיימת "{folder}"'
+    else:
+        confirm_label = f'✅ אשר {count} קבצים: "{folder}"' if count > 1 else f'✅ צור: "{folder}"'
     rows = [[Button.inline(confirm_label, data=f"confirm:{pending_id}")]]
     if _has_worthwhile_candidate(action):
         rows.append([Button.inline(f'📂 השתמש בקיימת: "{action["candidate"]}"', data=f"use_existing:{pending_id}")])
@@ -256,13 +282,19 @@ def _confirmation_buttons(pending_id, action):
     return rows
 
 
-async def send_confirmation(bot_client, chat_id, pending_id):
-    """Sends (or, on a rename/merge, re-edits) the folder-confirmation message for a pending action."""
+async def send_confirmation(bot_client, chat_id, pending_id, status_line=None):
+    """Sends (or, on a rename/merge, re-edits) the folder-confirmation message for a pending action.
+
+    `status_line` is a one-off line shown above the confirmation for this render only - the
+    reason a confirm didn't go through, with the buttons left in place to try again.
+    """
     action = state.pending_actions.get(pending_id)
     if not action:
         return
 
     text = _confirmation_text(action)
+    if status_line:
+        text = f"{status_line}\n\n{text}"
     buttons = _confirmation_buttons(pending_id, action)
 
     if action.get("status_msg"):
@@ -289,9 +321,21 @@ async def send_confirmation(bot_client, chat_id, pending_id):
     action["_sending"] = True
 
     try:
-        action["status_msg"] = await bot_client.send_message(chat_id, text, buttons=buttons)
+        try:
+            action["status_msg"] = await bot_client.send_message(chat_id, text, buttons=buttons)
+        except (errors.FloodWaitError, errors.FloodPremiumWaitError) as e:
+            # Nothing else will ever show this confirmation, and without it the files behind
+            # it can't be confirmed - so a short rate limit is waited out once, not given up on.
+            wait = getattr(e, "seconds", 0) or 0
+            if wait > FLOOD_RETRY_MAX_SECONDS:
+                raise
+            logging.warning(f"FloodWait sending confirmation {pending_id}, retrying in {wait}s")
+            await asyncio.sleep(wait + 1)
+            action["status_msg"] = await bot_client.send_message(chat_id, text, buttons=buttons)
     finally:
         action.pop("_sending", None)
+    # The new question is now what the chat is waiting on; a menu left above it only competes.
+    await keyboards.remove_menu_anchor(bot_client, chat_id)
 
 
 async def _set_awaiting_text(bot_client, chat_id, kind, target):
@@ -300,12 +344,31 @@ async def _set_awaiting_text(bot_client, chat_id, kind, target):
     it's stomping an older, still-open prompt (group rename vs. file-manager rename/mkdir
     can otherwise silently steal each other's typed reply if both are ever left open).
     """
-    if chat_id in state.awaiting_text_input:
+    previous = state.awaiting_text_input.get(chat_id)
+    # A second tap on the same ✏️ is the same prompt, not a new one replacing it.
+    if previous and (previous["kind"], previous["target"]) != (kind, target):
+        await _drop_awaiting_text(bot_client, chat_id)
         try:
             await bot_client.send_message(chat_id, "⏹️ הבקשה הקודמת בוטלה.")
         except Exception as e:
             logging.warning(f"Failed to send awaiting-text override notice: {e}")
     state.awaiting_text_input[chat_id] = {"kind": kind, "target": target, "created_at": time.time()}
+    await keyboards.remove_menu_anchor(bot_client, chat_id)
+
+
+async def _drop_awaiting_text(bot_client, chat_id):
+    """
+    Abandons this chat's open text prompt without an answer.
+
+    A prompt replaces its message's buttons with its own question, so abandoning a rename
+    used to leave the confirmation with no buttons at all - its files could then never be
+    confirmed, and a staged torrent sat there for good. The confirmation is redrawn instead.
+    File-manager and Jellyfin prompts keep a ↩️ button of their own, and their screens can be
+    reopened from the menu anyway.
+    """
+    prompt = state.awaiting_text_input.pop(chat_id, None)
+    if prompt and prompt["kind"] == "rename":
+        await send_confirmation(bot_client, chat_id, prompt["target"])
 
 
 def _clear_awaiting_text(chat_id, target):
@@ -313,6 +376,100 @@ def _clear_awaiting_text(chat_id, target):
     current = state.awaiting_text_input.get(chat_id)
     if current and current.get("target") == target:
         state.awaiting_text_input.pop(chat_id, None)
+
+
+def _clear_awaiting_kind(chat_id, *kinds):
+    """Clears the awaiting-text slot if it is one of `kinds` - for a screen's own ↩️ button."""
+    current = state.awaiting_text_input.get(chat_id)
+    if current and current.get("kind") in kinds:
+        state.awaiting_text_input.pop(chat_id, None)
+
+
+def existing_folders(base):
+    """The show/movie folders already in one library, in the order a person would look for them."""
+    base_dir = os.path.join(MEDIA_ROOT, base)
+    try:
+        names = os.listdir(base_dir)
+    except OSError:
+        return []
+    return sorted(
+        (n for n in names if not n.startswith(".") and os.path.isdir(os.path.join(base_dir, n))),
+        key=str.casefold,
+    )
+
+
+def open_folder_picker(action, base=None):
+    """
+    Snapshots the folders the ✏️ screen offers. The buttons carry an index into this list,
+    not the name - callback data is capped at 64 bytes - so it must not shift under them.
+    """
+    action["pick_base"] = base or action["base"]
+    action["folder_choices"] = existing_folders(action["pick_base"])
+
+
+def rename_prompt(pending_id, action, page=0):
+    """
+    The ✏️ screen: type a new name, or pick a folder already in the library that the
+    detection didn't match - a new name can only ever create a folder, not reach one.
+    Returns (text, buttons).
+    """
+    base = action.get("pick_base", action["base"])
+    choices = action.get("folder_choices", [])
+    total_pages = max(1, -(-len(choices) // FOLDER_PICK_PAGE_SIZE))
+    page = min(max(page, 0), total_pages - 1)
+    start = page * FOLDER_PICK_PAGE_SIZE
+    library = os.path.join(MEDIA_ROOT, base)
+
+    text = f"✏️ שלח/י הודעת טקסט עם השם החדש עבור *{action['folder']}*"
+    if choices:
+        text += f",\nאו בחר/י תיקייה קיימת מ-`{library}`:"
+        if total_pages > 1:
+            text += f" (עמוד {page + 1}/{total_pages})"
+    else:
+        text += f".\n(אין עדיין תיקיות ב-`{library}`.)"
+
+    rows = [
+        [Button.inline(f"📂 {name}", data=f"pick:{pending_id}:{index}")]
+        for index, name in enumerate(choices[start:start + FOLDER_PICK_PAGE_SIZE], start)
+    ]
+    page_row = []
+    if page > 0:
+        page_row.append(Button.inline("◀️ הקודם", data=f"pickpage:{pending_id}:{page - 1}"))
+    if page < total_pages - 1:
+        page_row.append(Button.inline("➡️ הבא", data=f"pickpage:{pending_id}:{page + 1}"))
+    if page_row:
+        rows.append(page_row)
+
+    other = "movies" if base == "tv" else "tv"
+    other_label = "🔄 הצג תיקיות סרטים" if other == "movies" else "🔄 הצג תיקיות סדרות"
+    rows.append([Button.inline(other_label, data=f"pickbase:{pending_id}")])
+    rows.append([Button.inline("↩️ חזרה", data=f"rename_back:{pending_id}")])
+    return text, rows
+
+
+def pick_existing_folder(action, index):
+    """
+    Points the action at the index-th folder the ✏️ screen offered, switching movies/tv if
+    it came from the other library. Returns the folder, or None for a stale button.
+    """
+    choices = action.get("folder_choices", [])
+    base = action.get("pick_base", action["base"])
+    if not 0 <= index < len(choices) or not folder_exists(base, choices[index]):
+        return None
+    folder = choices[index]
+    if base != action["base"]:
+        flip_base(action)
+    action["folder"] = folder
+    action["candidate"], action["candidate_score"] = find_similar_existing(os.path.join(MEDIA_ROOT, base), folder)
+    action.pop("folder_choices", None)
+    action.pop("pick_base", None)
+    return folder
+
+
+def _matching_existing_folder(base, name):
+    """The folder already in the library that `name` names, ignoring case - or None."""
+    wanted = name.strip().casefold()
+    return next((f for f in existing_folders(base) if f.casefold() == wanted), None)
 
 
 def _current_title(action):
@@ -346,7 +503,9 @@ def learn_from_confirmation(action, folder):
     auto-assigned to it without asking.
     """
     detected = action.get("detected_title")
-    chosen = parse_media_name(folder)
+    # The folder is the user's own choice - reading it through older aliases could chain
+    # one correction onto another.
+    chosen = parse_media_name(folder, apply_aliases=False)
     if not detected or not chosen["title"]:
         return
     try:
@@ -363,7 +522,8 @@ async def _handle_rename_reply(bot_client, chat_id, pending_id, text):
         return
 
     shown_title = _current_title(action)
-    reparsed = parse_media_name(text)
+    # What the user typed is the title they want, so no learned alias gets to replace it.
+    reparsed = parse_media_name(text, apply_aliases=False)
     # The action's current base is what the rename is measured against, so typing a new title
     # doesn't quietly undo a 🔄 flip the user just made. An explicit "S02" in the typed text
     # still wins - propose_folder only defers to the preferred base without a season marker.
@@ -396,6 +556,12 @@ async def _handle_rename_reply(bot_client, chat_id, pending_id, text):
                 year=new_year if new_year is not None else item["parsed"].get("year"),
             )
 
+    # Typing a folder that's already there - in any case - means that folder. Taken as typed,
+    # "the office" would sit next to "The Office" as a second, separate show.
+    existing = _matching_existing_folder(action["base"], action["folder"])
+    if existing:
+        action["folder"] = existing
+
     # Whatever the user deleted from the title we showed is likely a channel tag - offer to
     # drop it from every future name too. Measured against what was on screen, not the raw
     # detection, so a second rename doesn't re-offer words the first one already removed.
@@ -404,8 +570,10 @@ async def _handle_rename_reply(bot_client, chat_id, pending_id, text):
     )
 
     # A season typed into the rename is an explicit instruction, so it overrides the picker
-    # rather than being merged with what the filenames said.
-    action["season"] = typed_season
+    # rather than being merged with what the filenames said. A rename with no season in it
+    # only fixes the title - it must not throw away a ➕/➖ choice the user already made.
+    if typed_season is not None:
+        action["season"] = typed_season
     _sync_season(action)
     action["candidate"], action["candidate_score"] = find_similar_existing(
         os.path.join(MEDIA_ROOT, action["base"]), action["folder"]
@@ -489,37 +657,47 @@ async def _finalize_batch(bot_client, user_client, chat_id):
             logging.warning(f"Failed to send unknown-bucket notice: {e}")
         enqueue_group_downloads(bot_client, user_client, chat_id, "קבצים לא מזוהים", targets)
 
+    # One show failing to be offered (Telegram refusing a send, a folder that can't be listed)
+    # used to abort the loop, silently dropping every show after it in the same burst.
     for (base, folder), group_items in grouped.items():
-        rep_parsed = group_items[0]["parsed"]
-        exact_match = find_exact_existing(os.path.join(MEDIA_ROOT, base), rep_parsed.get("title") or folder, rep_parsed.get("year"))
+        try:
+            await _offer_group(bot_client, user_client, chat_id, base, folder, group_items)
+        except Exception as e:
+            logging.error(f"Could not offer {len(group_items)} file(s) for {base}/{folder}: {e}", exc_info=True)
 
-        if exact_match:
-            target_dir_display = os.path.join(MEDIA_ROOT, base, exact_match)
-            targets = [
-                (i["message"], build_target_dir(MEDIA_ROOT, base, exact_match, i["parsed"].get("season")), i["file_name"])
-                for i in group_items
-            ]
-            try:
-                await bot_client.send_message(
-                    chat_id,
-                    f'📥 *{len(targets)} קבצים* מ-*{folder}* שויכו לתיקייה קיימת '
-                    f'(`{exact_match}`) ונוספו לתור ההורדה אוטומטית ל-`{target_dir_display}`.'
-                )
-            except Exception as e:
-                logging.warning(f"Failed to send auto-assign notice: {e}")
-            enqueue_group_downloads(bot_client, user_client, chat_id, folder, targets)
-            continue
+    # The burst has been fully accounted for. A menu only follows if none of it is waiting
+    # on the user - otherwise it comes once the last confirmation is answered.
+    await keyboards.send_menu_when_idle(bot_client, chat_id)
 
-        existing_pid = _find_open_group(chat_id, base, folder)
-        if existing_pid:
-            merged = state.pending_actions[existing_pid]
-            merged["items"].extend(group_items)
-            _sync_season(merged)  # the new files may have widened the group to several seasons
-            await send_confirmation(bot_client, chat_id, existing_pid)
-        else:
-            pending_id = _new_group_action(chat_id, base, folder, group_items)
-            await send_confirmation(bot_client, chat_id, pending_id)
 
-    # The burst has been fully accounted for, so leave a usable menu at the bottom of the
-    # chat rather than making the user scroll back up past the confirmations to find one.
-    await keyboards.send_menu_anchor(bot_client, chat_id)
+async def _offer_group(bot_client, user_client, chat_id, base, folder, group_items):
+    """Auto-files one detected show/movie into its existing folder, or asks where it goes."""
+    rep_parsed = group_items[0]["parsed"]
+    exact_match = find_exact_existing(os.path.join(MEDIA_ROOT, base), rep_parsed.get("title") or folder, rep_parsed.get("year"))
+
+    if exact_match:
+        target_dir_display = os.path.join(MEDIA_ROOT, base, exact_match)
+        targets = [
+            (i["message"], build_target_dir(MEDIA_ROOT, base, exact_match, i["parsed"].get("season")), i["file_name"])
+            for i in group_items
+        ]
+        enqueue_group_downloads(bot_client, user_client, chat_id, folder, targets)
+        try:
+            await bot_client.send_message(
+                chat_id,
+                f'📥 *{len(targets)} קבצים* מ-*{folder}* שויכו לתיקייה קיימת '
+                f'(`{exact_match}`) ונוספו לתור ההורדה אוטומטית ל-`{target_dir_display}`.'
+            )
+        except Exception as e:
+            logging.warning(f"Failed to send auto-assign notice: {e}")
+        return
+
+    existing_pid = _find_open_group(chat_id, base, folder)
+    if existing_pid:
+        merged = state.pending_actions[existing_pid]
+        merged["items"].extend(group_items)
+        _sync_season(merged)  # the new files may have widened the group to several seasons
+        await send_confirmation(bot_client, chat_id, existing_pid)
+    else:
+        pending_id = _new_group_action(chat_id, base, folder, group_items)
+        await send_confirmation(bot_client, chat_id, pending_id)

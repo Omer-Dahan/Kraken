@@ -30,10 +30,28 @@ def is_in_staging(save_path):
     return bool(save_path) and os.path.normpath(save_path) == os.path.normpath(STAGING_DIR)
 
 
-async def add_torrent_to_qbit(urls=None, torrent_file_path=None, save_path="/media/movies"):
+# Marks which chat sent a torrent, so its folder confirmation goes back to that chat - the
+# hash isn't known when a magnet is added, and the watcher only sees torrents, not senders.
+OWNER_TAG_PREFIX = "kraken-chat-"
+
+
+def torrent_owner(torrent):
+    """The chat id a torrent was sent from, read back from its owner tag, or None."""
+    for tag in (torrent.get("tags") or "").split(","):
+        tag = tag.strip()
+        if tag.startswith(OWNER_TAG_PREFIX):
+            chat_id = tag[len(OWNER_TAG_PREFIX):]
+            if chat_id.lstrip("-").isdigit():
+                return int(chat_id)
+    return None
+
+
+async def add_torrent_to_qbit(urls=None, torrent_file_path=None, save_path="/media/movies", chat_id=None):
     """Sends a magnet URL or .torrent file to qBittorrent API without blocking."""
     try:
         data = {"savepath": save_path, "autoTCM": "false"}
+        if chat_id is not None:
+            data["tags"] = f"{OWNER_TAG_PREFIX}{chat_id}"
 
         def _post_request():
             sess = _get_http_session()

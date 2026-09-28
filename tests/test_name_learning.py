@@ -20,7 +20,7 @@ from confirmation_flow import (
     learn_from_confirmation,
 )
 from learned_names import DEFAULT_IGNORE_WORDS, NameMemory, dropped_phrases
-from media_organizer import parse_media_name, propose_folder, strip_release_noise
+from media_organizer import find_exact_existing, parse_media_name, propose_folder, strip_release_noise
 import bot_state as state
 
 
@@ -131,7 +131,15 @@ class IgnoreList(unittest.TestCase):
 class DroppedPhrases(unittest.TestCase):
     def test_deleted_runs_are_offered(self):
         self.assertEqual(dropped_phrases("סרטי הלילה הבית של הדרקון", "הבית של הדרקון"), ["סרטי הלילה"])
-        self.assertEqual(dropped_phrases("א הסרט ב", "הסרט"), ["א", "ב"])
+        self.assertEqual(dropped_phrases("השימיה הסרט מתורגם", "הסרט"), ["השימיה", "מתורגם"])
+
+    def test_words_cut_from_the_middle_are_an_edit_not_a_tag(self):
+        self.assertEqual(dropped_phrases("Spider Man No Way Home", "Spider Man Way Home"), [])
+
+    def test_articles_are_never_offered(self):
+        """One tap on "The" would strip it from every title in the library."""
+        self.assertEqual(dropped_phrases("The Matrix", "Matrix"), [])
+        self.assertEqual(dropped_phrases("ז.מ הסרט", "הסרט"), ["ז מ"])
 
     def test_a_full_retype_offers_nothing(self):
         self.assertEqual(dropped_phrases("הבית של הדרקון", "House of the Dragon"), [])
@@ -191,6 +199,31 @@ class LearningInTheConfirmationFlow(UsesFreshMemory):
         learn_from_confirmation(state.pending_actions[pid], "House of the Dragon (2022)")
         stored = json.loads(self.memory.path.read_text(encoding="utf-8"))["aliases"]
         self.assertEqual(stored, {"dragon house": {"title": "House of the Dragon", "year": 2022}})
+
+
+class AliasesDoNotMisfile(UsesFreshMemory):
+    def test_an_alias_is_skipped_when_the_name_has_a_different_year(self):
+        self.memory.remember_alias("Dune", "Dune Part Two", 2024)
+        self.assertEqual(parse_media_name("Dune.1984.mkv")["title"], "Dune")
+        self.assertEqual(parse_media_name("Dune.mkv")["title"], "Dune Part Two")
+
+    def test_existing_folders_are_not_retitled_by_aliases(self):
+        """A "House (2004)" folder must not read as whatever "House" was once corrected to."""
+        self.memory.remember_alias("House", "House of the Dragon")
+        library = Path(tempfile.mkdtemp())
+        (library / "House (2004)").mkdir()
+        self.assertIsNone(find_exact_existing(str(library), "House of the Dragon"))
+        self.assertEqual(find_exact_existing(str(library), "House", 2004), "House (2004)")
+
+    def test_a_typed_rename_is_taken_literally(self):
+        self.memory.remember_alias("House", "House of the Dragon")
+        bot = mock.MagicMock()
+        bot.send_message = mock.AsyncMock()
+        self.addCleanup(state.pending_actions.clear)
+        items = [{"file_name": "X.S01E01.mkv", "parsed": parse_media_name("X.S01E01.mkv"), "message": None}]
+        pid = _new_group_action(1, "tv", "X", items)
+        asyncio.run(_handle_rename_reply(bot, 1, pid, "House"))
+        self.assertEqual(state.pending_actions[pid]["folder"], "House")
 
 
 if __name__ == "__main__":

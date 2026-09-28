@@ -17,6 +17,7 @@ from download_engine import _queue_status_text
 from media_organizer import parse_media_name, propose_folder, sanitize_folder_name
 from qbit_client import (
     is_in_staging,
+    torrent_owner,
     qbit_get_torrents,
     qbit_set_priority,
     qbit_pause_torrent,
@@ -564,7 +565,9 @@ async def watch_staged_torrents(bot_client):
                 # Per-torrent try/except: one failing torrent must not block the rest.
                 try:
                     name = t.get("name", "")
-                    owner_id = ALLOWED_USER_IDS[0]
+                    # Torrents added before owner tags existed, or straight in qBittorrent's
+                    # own UI, have no sender to go back to.
+                    owner_id = torrent_owner(t) or ALLOWED_USER_IDS[0]
                     parsed = parse_media_name(name)
                     # Torrent names are noisier than filenames (release groups, tracker tags), so
                     # the destination the owner has selected carries even more weight here.

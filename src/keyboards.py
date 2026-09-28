@@ -78,6 +78,43 @@ async def send_menu_anchor(bot_client, chat_id, text=None):
             logging.warning(f"Failed to delete the previous main-menu anchor: {e}")
 
 
+def is_waiting_for_user(chat_id):
+    """Whether this chat has an open folder confirmation or a prompt waiting for typed text."""
+    return chat_id in state.awaiting_text_input or any(
+        action["chat_id"] == chat_id for action in state.pending_actions.values()
+    )
+
+
+async def remove_menu_anchor(bot_client, chat_id):
+    previous = state.menu_anchors.pop(chat_id, None)
+    if previous:
+        try:
+            await bot_client.delete_messages(chat_id, previous)
+        except Exception as e:
+            logging.warning(f"Failed to delete the main-menu anchor: {e}")
+
+
+async def send_menu_when_idle(bot_client, chat_id, text=None):
+    """
+    The menu the bot drops on its own after finishing something - a burst of files, a
+    confirm - as opposed to one the user asked for with /menu.
+
+    While a confirmation or a "type a name" prompt is still open, a fresh menu under it reads
+    as the bot having moved on, and its buttons invite taps that walk away from the question.
+    So nothing is offered until that's answered (the last confirm or cancel sends it), and an
+    older menu still on screen is taken down. `text` still goes out, just without the menu.
+    """
+    if not is_waiting_for_user(chat_id):
+        await send_menu_anchor(bot_client, chat_id, text)
+        return
+    await remove_menu_anchor(bot_client, chat_id)
+    if text:
+        try:
+            await bot_client.send_message(chat_id, text)
+        except Exception as e:
+            logging.warning(f"Failed to send a message while waiting for the user: {e}")
+
+
 def claim_message(chat_id, msg_id):
     """
     Marks the anchor message as no longer being a menu, because a screen just took it over.

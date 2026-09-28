@@ -11,7 +11,7 @@ import bot_state as state
 import file_browser
 import keyboards
 from bot_config import MEDIA_ROOT, FB_PAGE_SIZE
-from confirmation_flow import _set_awaiting_text
+from confirmation_flow import _set_awaiting_text, _clear_awaiting_kind
 
 
 def _fb_new_session(cwd=""):
@@ -241,6 +241,12 @@ async def _fb_handle_rename_text(bot_client, chat_id, target_rel, text):
         await bot_client.send_message(chat_id, status)
 
 
+def _fb_prompt_buttons(session):
+    # Without a button of its own, a prompt the user walks away from leaves the browser
+    # message with nothing to tap at all.
+    return [[Button.inline("↩️ חזרה", data=f"fb:back:{session['epoch']}")]]
+
+
 def _int_part(parts, index):
     """The integer at parts[index], or None when the callback data doesn't carry one.
 
@@ -333,6 +339,8 @@ async def _fb_handle_callback(bot_client, event, chat_id, cq_data):
         return
 
     if action == "back":
+        # Also the ↩️ on a rename/mkdir prompt - the typed reply it was waiting for is off.
+        _clear_awaiting_kind(chat_id, "fb_rename", "fb_mkdir")
         session["mode"] = "browse"
         session["selected"] = None
         await event.answer()
@@ -344,7 +352,8 @@ async def _fb_handle_callback(bot_client, event, chat_id, cq_data):
         await _set_awaiting_text(bot_client, chat_id, "fb_mkdir", session["cwd"])
         await bot_client.edit_message(
             chat_id, session["msg_id"],
-            f"🆕 שלח/י שם לתיקייה החדשה בתוך `{_fb_breadcrumb(session['cwd'])}`."
+            f"🆕 שלח/י שם לתיקייה החדשה בתוך `{_fb_breadcrumb(session['cwd'])}`.",
+            buttons=_fb_prompt_buttons(session),
         )
         return
 
@@ -353,7 +362,8 @@ async def _fb_handle_callback(bot_client, event, chat_id, cq_data):
         await _set_awaiting_text(bot_client, chat_id, "fb_rename", session["selected"])
         await bot_client.edit_message(
             chat_id, session["msg_id"],
-            f"✏️ שלח/י שם חדש עבור `{posixpath.basename(session['selected'])}`."
+            f"✏️ שלח/י שם חדש עבור `{posixpath.basename(session['selected'])}`.",
+            buttons=_fb_prompt_buttons(session),
         )
         return
 

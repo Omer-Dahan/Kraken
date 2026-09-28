@@ -37,6 +37,10 @@ _SEPARATORS = re.compile(r"[\s._\-]+")
 # name doesn't bury the confirmation under a button per word.
 MAX_SUGGESTIONS = 3
 
+# The shortest single word worth offering as a tag - below this it's an article or a
+# preposition ("The", "של"), not a channel name.
+MIN_SINGLE_WORD_TAG = 4
+
 
 def _key(text):
     """Casefolded, separator-insensitive form: "Lulu.Movies" and "lulu movies" are one key."""
@@ -114,8 +118,8 @@ class NameMemory:
 
 def dropped_phrases(detected_title, typed_title, known=()):
     """
-    The runs of words the user deleted when retyping a title - each one a candidate for the
-    ignore list. "לולו סרטים הבית" retyped as "הבית" gives ["לולו סרטים"].
+    The runs of words the user cut from the start or end when retyping a title - each one a
+    candidate for the ignore list. "לולו סרטים הבית" retyped as "הבית" gives ["לולו סרטים"].
 
     Digit-only runs are left out (a year or a season number, not a channel tag), and so is
     anything `known` already covers. A retype that shares no word with the original is a
@@ -126,22 +130,22 @@ def dropped_phrases(detected_title, typed_title, known=()):
     if not any(w.casefold() in kept for w in words):
         return []
 
-    known_keys = {_key(k) for k in known}
-    runs, current = [], []
-    for word in words:
-        if word.casefold() not in kept:
-            current.append(word)
-            continue
-        if current:
-            runs.append(current)
-        current = []
-    if current:
-        runs.append(current)
+    # Only the words cut from either end: that's where channels stamp their tags. A word
+    # dropped from the middle is an edit to the title itself, and an ignore phrase applies to
+    # every future name - "Spider Man No Way Home" retyped without "No" must not offer it.
+    first_kept = next(i for i, w in enumerate(words) if w.casefold() in kept)
+    last_kept = max(i for i, w in enumerate(words) if w.casefold() in kept)
+    runs = [words[:first_kept], words[last_kept + 1:]]
 
+    known_keys = {_key(k) for k in known}
     phrases = []
     for run in runs:
         phrase = " ".join(run)
-        if phrase.replace(" ", "").isdigit() or _key(phrase) in known_keys or phrase in phrases:
+        if not run or phrase.replace(" ", "").isdigit() or _key(phrase) in known_keys or phrase in phrases:
+            continue
+        # "The Matrix" retyped as "Matrix" would otherwise offer "The" - one tap and every
+        # title in the library loses its article. Real tags are longer, or more than one word.
+        if len(run) == 1 and len(phrase) < MIN_SINGLE_WORD_TAG:
             continue
         phrases.append(phrase)
     return phrases[:MAX_SUGGESTIONS]
