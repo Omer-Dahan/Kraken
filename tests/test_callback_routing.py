@@ -55,9 +55,10 @@ class ConfirmationButtonsRouting(unittest.TestCase):
             "candidate": "The Office (US)",
             "candidate_score": 90,
             "items": [{"file_name": "S03E01.mkv"}],
+            "ignore_suggestions": ["לולו סרטים", None],
         }
         rows = _confirmation_buttons("test_pid", action)
-        valid_prefixes = ("confirm:", "use_existing:", "flip:", "season:", "rename:", "cancel:")
+        valid_prefixes = ("confirm:", "use_existing:", "flip:", "season:", "ignore:", "rename:", "cancel:")
         for row in rows:
             for btn in row:
                 data = btn.data.decode("utf-8")

@@ -31,7 +31,9 @@ from download_engine import link_bot_and_userbot, start_download_workers, enqueu
 from confirmation_flow import (
     _set_awaiting_text, _clear_awaiting_text, _handle_rename_reply, _add_to_batch,
     send_confirmation, adjust_season, flip_base, item_season,
+    accept_ignore_suggestion, learn_from_confirmation,
 )
+import learned_names
 from file_manager_ui import _fb_open, _fb_handle_callback, _fb_handle_rename_text, _fb_handle_mkdir_text
 from torrents_screen import _tor_open, _tor_handle_callback, watch_staged_torrents
 from jellyfin_screen import _jf_open, _jf_handle_callback, _jf_handle_search_text
@@ -133,6 +135,32 @@ def is_user_authorized(user_id):
         logging.warning(f"Security: ALLOWED_USER_IDS is empty! Rejecting user {user_id}.")
         return False
     return user_id in ALLOWED_USER_IDS
+
+
+async def _handle_ignore_command(bot_client, chat_id, text):
+    """/ignore lists the phrases stripped from every name, /ignore X adds one, /unignore X removes one."""
+    command, _, phrase = text.partition(" ")
+    phrase = phrase.strip()
+    memory = learned_names.memory
+
+    if command == "/ignore" and not phrase:
+        words = "\n".join(f"• `{w}`" for w in memory.ignore_words()) or "(ריקה)"
+        reply = f"🚫 *מילים שמסוננות מכל שם קובץ:*\n{words}\n\nהוספה: `/ignore מילה`  ·  הסרה: `/unignore מילה`"
+    elif command not in ("/ignore", "/unignore") or not phrase:
+        reply = "שימוש: `/ignore מילה` להוספה, `/unignore מילה` להסרה, `/ignore` לבד להצגת הרשימה."
+    else:
+        try:
+            if command == "/ignore":
+                changed = memory.add_ignore_word(phrase)
+                reply = f'🚫 "{phrase}" יסונן מכל שם מעכשיו.' if changed else f'"{phrase}" כבר ברשימה.'
+            else:
+                changed = memory.remove_ignore_word(phrase)
+                reply = f'✅ "{phrase}" הוסר מהרשימה.' if changed else f'"{phrase}" לא נמצא ברשימה.'
+        except OSError as e:
+            logging.error(f"Could not save the ignore list: {e}")
+            reply = "❌ שגיאה בשמירת הרשימה."
+
+    await send_menu_anchor(bot_client, chat_id, reply)
 
 
 async def maintenance_loop():
@@ -302,12 +330,14 @@ async def main():
                     "ממתינים, הושלמו, ותור ההורדות של טלגרם. המספר שעל הכפתור הוא כמה רצות ברגע זה.\n"
                     "6. **מנהל קבצים:** כפתור 🗂 מאפשר להעביר/לשנות שם/ליצור/למחוק תיקיות וקבצים תחת /media.\n"
                     "7. **Jellyfin:** כפתור 🍿 (או `/jellyfin`) - רענון ספריות, מי צופה עכשיו, חיפוש תוכן "
-                    "וקישור ישיר לצפייה, ותיקון מטא-דאטה לתוכן שלא זוהה נכון."
+                    "וקישור ישיר לצפייה, ותיקון מטא-דאטה לתוכן שלא זוהה נכון.\n"
+                    "8. **מילים לסינון:** `/ignore` מציג את הרשימה, `/ignore לולו סרטים` מוסיף, "
+                    "`/unignore לולו סרטים` מסיר. שם שתיקנתם ידנית נזכר, והקובץ הבא באותו שם יזוהה לבד."
                 )
                 await event.edit(help_text, buttons=get_main_keyboard(current_mode))
 
-            elif cq_data.startswith(("flip:", "season:")):
-                # Neither of these finalizes anything - they only adjust what the still-open
+            elif cq_data.startswith(("flip:", "season:", "ignore:")):
+                # None of these finalizes anything - they only adjust what the still-open
                 # confirmation proposes - so unlike confirm/cancel below they must NOT claim
                 # the pending action by popping it.
                 kind, _, rest = cq_data.partition(":")
@@ -322,6 +352,10 @@ async def main():
 
                 if kind == "flip":
                     await event.answer("📺 סדרה" if flip_base(action) == "tv" else "🎬 סרט")
+                elif kind == "ignore":
+                    index = int(delta_str) if delta_str.isdigit() else -1
+                    phrase = accept_ignore_suggestion(action, index)
+                    await event.answer(f'🚫 "{phrase}" יסונן מכל שם מעכשיו.' if phrase else "")
                 else:
                     delta = int(delta_str) if delta_str.lstrip("-").isdigit() else 0
                     if not delta:
@@ -386,6 +420,7 @@ async def main():
 
                 # confirm / use_existing
                 folder = action["candidate"] if (action_type == "use_existing" and action["candidate"]) else action["folder"]
+                learn_from_confirmation(action, folder)
 
                 if action["type"] == "torrent":
                     await event.answer("מאשר...")
@@ -530,6 +565,10 @@ async def main():
 
         if text in ["/status", "/downloads"]:
             await _tor_open(bot_client, chat_id)
+            return
+
+        if text.startswith(("/ignore", "/unignore")):
+            await _handle_ignore_command(bot_client, chat_id, text)
             return
 
         if text == "/queue":

@@ -13,6 +13,7 @@ from telethon import Button, errors
 
 import bot_state as state
 import keyboards
+import learned_names
 from bot_config import MEDIA_ROOT, BATCH_DEBOUNCE_SECONDS, SIMILARITY_MENTION_THRESHOLD
 from media_organizer import (
     DEFAULT_SEASON,
@@ -41,6 +42,7 @@ def _new_pending_action(action_type, chat_id, base, folder, parsed, **extra):
         "base": base,
         "folder": folder,
         "season": parsed.get("season"),
+        "detected_title": parsed.get("detected_title"),
         "candidate": candidate,
         "candidate_score": score,
         "status_msg": None,
@@ -62,6 +64,7 @@ def _new_group_action(chat_id, base, folder, items):
         "base": base,
         "folder": folder,
         "season": None,
+        "detected_title": items[0]["parsed"].get("detected_title") if items else None,
         "candidate": candidate,
         "candidate_score": score,
         "items": items,
@@ -240,6 +243,12 @@ def _confirmation_buttons(pending_id, action):
             Button.inline("➖ עונה", data=f"season:{pending_id}:-1"),
         ])
 
+    # The phrase itself stays in the action, not in the button: callback data is capped at
+    # 64 bytes, and Hebrew spends two of them per letter.
+    for index, phrase in enumerate(action.get("ignore_suggestions", [])):
+        if phrase:
+            rows.append([Button.inline(f'🚫 להתעלם תמיד מ-"{phrase}"', data=f"ignore:{pending_id}:{index}")])
+
     rows.append([
         Button.inline("✏️ שנה שם", data=f"rename:{pending_id}"),
         Button.inline("❌ ביטול", data=f"cancel:{pending_id}"),
@@ -306,12 +315,54 @@ def _clear_awaiting_text(chat_id, target):
         state.awaiting_text_input.pop(chat_id, None)
 
 
+def _current_title(action):
+    if action["type"] == "video_group":
+        return action["items"][0]["parsed"].get("title") if action["items"] else None
+    return action["parsed"].get("title")
+
+
+def accept_ignore_suggestion(action, index):
+    """
+    Adds the index-th offered phrase to the ignore list. Returns the phrase, or None when that
+    button is stale. The slot is blanked rather than removed so the other buttons' indexes,
+    already sent to Telegram, keep pointing at the same phrases.
+    """
+    suggestions = action.get("ignore_suggestions", [])
+    if not 0 <= index < len(suggestions) or not suggestions[index]:
+        return None
+    phrase, suggestions[index] = suggestions[index], None
+    try:
+        learned_names.memory.add_ignore_word(phrase)
+    except OSError as e:
+        logging.warning(f"Could not save ignore word {phrase!r}: {e}")
+        return None
+    return phrase
+
+
+def learn_from_confirmation(action, folder):
+    """
+    Remembers which folder the name the bot detected was finally filed under, so the same
+    name is recognized as that show/movie next time - and, when the folder already exists,
+    auto-assigned to it without asking.
+    """
+    detected = action.get("detected_title")
+    chosen = parse_media_name(folder)
+    if not detected or not chosen["title"]:
+        return
+    try:
+        if learned_names.memory.remember_alias(detected, chosen["title"], chosen["year"]):
+            logging.info(f"Learned title alias: {detected!r} -> {chosen['title']!r} ({chosen['year']})")
+    except OSError as e:
+        logging.warning(f"Could not save title alias for {detected!r}: {e}")
+
+
 async def _handle_rename_reply(bot_client, chat_id, pending_id, text):
     """Applies a typed replacement title to a pending torrent or video_group action."""
     action = state.pending_actions.get(pending_id)
     if not action:
         return
 
+    shown_title = _current_title(action)
     reparsed = parse_media_name(text)
     # The action's current base is what the rename is measured against, so typing a new title
     # doesn't quietly undo a 🔄 flip the user just made. An explicit "S02" in the typed text
@@ -344,6 +395,13 @@ async def _handle_rename_reply(bot_client, chat_id, pending_id, text):
                 title=new_title,
                 year=new_year if new_year is not None else item["parsed"].get("year"),
             )
+
+    # Whatever the user deleted from the title we showed is likely a channel tag - offer to
+    # drop it from every future name too. Measured against what was on screen, not the raw
+    # detection, so a second rename doesn't re-offer words the first one already removed.
+    action["ignore_suggestions"] = learned_names.dropped_phrases(
+        shown_title, _current_title(action), known=learned_names.memory.ignore_words()
+    )
 
     # A season typed into the rename is an explicit instruction, so it overrides the picker
     # rather than being merged with what the filenames said.

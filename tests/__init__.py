@@ -1,6 +1,6 @@
 """Test package. Run with `python -m unittest discover -s tests -t .` from Kraken/.
 
-Two things have to be set up here, before unittest imports any test module - and
+Three things have to be set up here, before unittest imports any test module - and
 therefore before any module under test is imported.
 
 1. The bot's modules live in src/ and import each other flat (`import bot_state as
@@ -28,3 +28,13 @@ for _name, _placeholder in (
     ("ALLOWED_USER_IDS", "12345"),
 ):
     os.environ.setdefault(_name, _placeholder)
+
+# 3. learned_names loads the real learned_names.json at import, and parse_media_name reads
+#    it on every call - so a developer's own corrections would leak into test results, and a
+#    test that teaches the bot something would write into their file. Point it at an empty
+#    one in a temp dir instead; tests that need a particular state swap in their own.
+import tempfile  # noqa: E402
+
+import learned_names  # noqa: E402
+
+learned_names.memory = learned_names.NameMemory(Path(tempfile.mkdtemp()) / "learned_names.json")

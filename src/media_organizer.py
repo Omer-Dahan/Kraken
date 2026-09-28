@@ -3,11 +3,15 @@
 Media filename parsing (guessit) and Jellyfin folder organization logic.
 """
 
+import functools
 import os
 import re
+import unicodedata
 
 from guessit import guessit
 from rapidfuzz import fuzz, process
+
+import learned_names
 
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -45,6 +49,76 @@ _NUMERIC_TITLE = re.compile(r"^(\d{4})(?=\D|$)")
 # Default season fallback for series files
 DEFAULT_SEASON = 1
 
+# Links and @handles that channels stamp into names. guessit files them under
+# alternative_title at best, or swallows them into the title itself. A link runs to the
+# next space, but stops short of a trailing ".mkv".
+_LINK_OR_HANDLE = re.compile(r"(?:https?://|www\.|t\.me/)\S+?(?=\s|\.\w{2,4}$|$)|@\w+", re.IGNORECASE)
+
+# Hebrew letters that attach to the front of a word ("מזירה מדיה", "והשימיה"), so an
+# ignored phrase is still caught when one of them is glued on.
+_HEBREW_PREFIX = "[ובלמהשכ]?"
+
+# Separator runs left behind once something is cut out of the middle of a name.
+_EMPTY_BRACKETS = re.compile(r"[\[({]\s*[\])}]")
+_DASH_RUN = re.compile(r"(?:\s*[-–—|]\s*){2,}")
+_EDGE_SEPARATORS = re.compile(r"^[\s._\-–—|:]+|[\s_\-–—|:]+(?=\.\w{2,4}$)|[\s._\-–—|:]+$")
+
+# guessit knows "S02E05" but no Hebrew at all. These rewrite the common Hebrew spellings
+# into that form, most specific first so "עונה 2 פרק 5" doesn't become "S02 פרק 5".
+_SEP = r"[\s._\-'׳,]*"
+_WORD_START = rf"(?<![^\W_]){_HEBREW_PREFIX}"
+_HEBREW_EPISODE_MARKERS = [
+    (re.compile(rf"{_WORD_START}עונה{_SEP}(\d{{1,2}}){_SEP}פרק{_SEP}(\d{{1,3}})(?!\d)"), "S{0:02d}E{1:02d}"),
+    (re.compile(rf"(?<![^\W_])ע{_SEP}(\d{{1,2}}){_SEP}פ{_SEP}(\d{{1,3}})(?!\d)"), "S{0:02d}E{1:02d}"),
+    (re.compile(rf"{_WORD_START}עונה{_SEP}(\d{{1,2}})(?!\d)"), "S{0:02d}"),
+    (re.compile(rf"{_WORD_START}פרק{_SEP}(\d{{1,3}})(?!\d)"), "E{0:02d}"),
+]
+
+
+@functools.lru_cache(maxsize=8)
+def _ignore_pattern(ignore_words):
+    """
+    One alternation for the whole ignore list, longest phrase first so "לולו סרטים" wins
+    over a shorter "לולו". Inside a phrase any separator run - or none at all - matches, so
+    "ז.מ" also catches "ז מ" and "לולו סרטים" also catches "לולו.סרטים" and "לולוסרטים".
+    """
+    alternatives = []
+    for phrase in sorted(ignore_words, key=len, reverse=True):
+        words = [re.escape(w) for w in re.split(r"[\s._\-]+", phrase) if w]
+        if words:
+            alternatives.append(r"[\s._\-]*".join(words))
+    if not alternatives:
+        return None
+    return re.compile(rf"(?<![^\W_]){_HEBREW_PREFIX}(?:{'|'.join(alternatives)})(?![^\W_])", re.IGNORECASE)
+
+
+def _hebrew_to_episode_markers(name):
+    for pattern, template in _HEBREW_EPISODE_MARKERS:
+        name = pattern.sub(lambda m: f" {template.format(*map(int, m.groups()))} ", name)
+    return name
+
+
+def strip_release_noise(name, ignore_words=()):
+    """
+    Cuts what isn't the title out of a name before guessit sees it: ignored phrases (channel
+    tags and the like), links and @handles, and emoji. Hebrew season/episode wording is
+    rewritten as S01E02 on the way.
+
+    This matters beyond tidiness: in "זירה מדיה - הסרט שלי 2020" guessit takes the part
+    before the dash as the title and demotes the real title to alternative_title.
+    """
+    name = _BIDI_AND_ZERO_WIDTH.sub("", name or "")
+    name = _LINK_OR_HANDLE.sub(" ", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "So" and c != "️")
+    pattern = _ignore_pattern(tuple(ignore_words))
+    if pattern:
+        name = pattern.sub(" ", name)
+    name = _hebrew_to_episode_markers(name)
+    name = _EMPTY_BRACKETS.sub(" ", name)
+    name = _DASH_RUN.sub(" - ", name)
+    name = _EDGE_SEPARATORS.sub("", name)
+    return _WHITESPACE.sub(" ", name).strip()
+
 
 def _first(value):
     """guessit returns a list for ranges (e.g. S01E01E02) - take the first."""
@@ -57,11 +131,16 @@ def parse_media_name(filename_or_title):
     """
     Parses a filename (or bare title) into normalized media info.
 
-    Returns {"kind": "episode"|"movie"|"unknown", "title", "year", "season", "episode",
-    "series_marker"}. `series_marker` says the name literally spells out a season, which is
+    Returns {"kind": "episode"|"movie"|"unknown", "title", "detected_title", "year", "season",
+    "episode", "series_marker"}. `series_marker` says the name literally spells out a season, which is
     what propose_folder trusts over the user's own movies/tv choice.
+
+    A title the user has corrected before (see learned_names) comes back as the corrected one;
+    `detected_title` keeps what the name itself said, which is what a new correction is keyed on.
     """
-    guess = guessit(filename_or_title)
+    memory = learned_names.memory
+    name = strip_release_noise(filename_or_title, memory.ignore_words())
+    guess = guessit(name) if name else {}
     title = guess.get("title")
     year = guess.get("year")
 
@@ -70,14 +149,14 @@ def parse_media_name(filename_or_title):
         # left with no title at all, so the file would fall into the "unrecognized" bucket.
         # A name that IS just a four-digit number is a real movie title far more often than
         # it is nothing, so take it as the title and drop the year.
-        stem = os.path.splitext(os.path.basename(filename_or_title))[0]
+        stem = os.path.splitext(os.path.basename(name))[0]
         numeric = _NUMERIC_TITLE.match(stem)
         if numeric and int(numeric.group(1)) == year:
             title, year = numeric.group(1), None
 
     if not title:
         return {
-            "kind": "unknown", "title": None, "year": None,
+            "kind": "unknown", "title": None, "detected_title": None, "year": None,
             "season": None, "episode": None, "series_marker": False,
         }
 
@@ -91,13 +170,20 @@ def parse_media_name(filename_or_title):
     else:
         kind = "unknown"
 
+    title = detected_title = title.strip()
+    alias = memory.alias_for(detected_title)
+    if alias:
+        title, alias_year = alias
+        year = alias_year if alias_year is not None else year
+
     return {
         "kind": kind,
-        "title": title.strip(),
+        "title": title,
+        "detected_title": detected_title,
         "year": year,
         "season": season,
         "episode": episode,
-        "series_marker": bool(_SEASON_MARKER.search(filename_or_title)),
+        "series_marker": bool(_SEASON_MARKER.search(name)),
     }
 
 

@@ -29,3 +29,7 @@ Thumbs.db
 # Project overview documentation
 SOFTWARE_OVERVIEW.md
 
+
+# What the bot learned from the user: ignored name phrases and corrected titles
+learned_names.json
+learned_names.json.*
