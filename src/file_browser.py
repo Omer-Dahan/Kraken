@@ -121,6 +121,12 @@ def rename_entry(root, rel_path, new_name):
     if not os.path.exists(src_abs):
         raise FileManagerError("הפריט כבר לא קיים.")
     _require_within_root(root, src_abs)
+    if os.path.isfile(src_abs):
+        # People type the title they want, not "Title.mkv" - and a video renamed to a bare
+        # "Dune" drops out of Jellyfin, which only scans files with a video extension.
+        ext = os.path.splitext(src_abs)[1]
+        if ext and not new_name.lower().endswith(ext.lower()):
+            new_name += ext
     parent_abs = os.path.dirname(src_abs)
     _reject_collision(parent_abs, new_name)
     dest_abs = os.path.join(parent_abs, new_name)

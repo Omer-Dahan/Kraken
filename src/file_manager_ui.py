@@ -228,8 +228,8 @@ async def _fb_handle_mkdir_text(bot_client, chat_id, target_cwd, text):
 
 async def _fb_handle_rename_text(bot_client, chat_id, target_rel, text):
     try:
-        file_browser.rename_entry(MEDIA_ROOT, target_rel, text)
-        status = f"✅ שונה השם ל-*{text}*"
+        new_rel = file_browser.rename_entry(MEDIA_ROOT, target_rel, text)
+        status = f"✅ שונה השם ל-*{new_rel.rsplit('/', 1)[-1]}*"
     except file_browser.FileManagerError as e:
         status = f"❌ {e}"
     session = state.fb_sessions.get(chat_id)

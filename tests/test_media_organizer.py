@@ -18,7 +18,7 @@ from media_organizer import (
     sanitize_file_name,
     sanitize_folder_name,
 )
-from telegram_bot import is_library_media
+from telegram_bot import is_library_media, with_video_extension
 
 
 class SeasonMarkerDetection(unittest.TestCase):
@@ -232,6 +232,21 @@ class IncomingMediaClassification(unittest.TestCase):
 
     def test_a_video_sticker_is_rejected_despite_its_video_mime_type(self):
         self.assertFalse(is_library_media("sticker.webm", "video/webm", has_document=True, is_sticker=True))
+
+
+class IncomingMediaExtension(unittest.TestCase):
+    """An accepted video is never saved without a video extension - Jellyfin skips those."""
+
+    def test_a_name_that_already_has_a_video_extension_is_left_alone(self):
+        self.assertEqual(with_video_extension("Show.S01E01.MKV", "video/mp4"), "Show.S01E01.MKV")
+
+    def test_a_bare_name_gets_the_extension_its_mime_type_implies(self):
+        self.assertEqual(with_video_extension("release", "video/x-matroska"), "release.mkv")
+
+    def test_a_dotted_release_name_is_not_mistaken_for_one_with_an_extension(self):
+        self.assertEqual(
+            with_video_extension("Movie.2020.1080p", "application/octet-stream"), "Movie.2020.1080p.mp4"
+        )
 
 
 class FixPermissionsTolerance(unittest.TestCase):

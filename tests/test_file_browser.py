@@ -146,6 +146,15 @@ class OperationsInsideALibraryFolder(LibraryTestCase):
         self.assertTrue(os.path.isdir(self.abs("tv", "The Office (US)")))
         self.assertFalse(os.path.exists(self.abs("tv", "The Office")))
 
+    def test_renaming_a_file_keeps_its_extension_when_the_new_name_leaves_it_out(self):
+        self.assertEqual(fb.rename_entry(self.root, "movies/Dune (2021)/Dune.mkv", "Dune Part One"),
+                         "movies/Dune (2021)/Dune Part One.mkv")
+        self.assertTrue(os.path.isfile(self.abs("movies", "Dune (2021)", "Dune Part One.mkv")))
+
+    def test_renaming_a_file_with_its_extension_typed_does_not_double_it(self):
+        self.assertEqual(fb.rename_entry(self.root, "movies/Dune (2021)/Dune.mkv", "Dune 2021.MKV"),
+                         "movies/Dune (2021)/Dune 2021.MKV")
+
     def test_a_show_folder_can_be_moved_between_libraries(self):
         fb.move_entry(self.root, "tv/The Office", "movies")
         self.assertTrue(os.path.isdir(self.abs("movies", "The Office")))

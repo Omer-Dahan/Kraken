@@ -47,6 +47,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # (plenty of releases arrive as application/octet-stream).
 VIDEO_EXTENSIONS = frozenset({".mkv", ".mp4", ".avi", ".m4v", ".mov", ".iso", ".ts", ".webm"})
 
+# Container extension for a video whose name has none. Anything unlisted gets .mp4, the
+# same guess an unnamed video already got - ffprobe reads the real container either way,
+# the extension only has to be one Jellyfin will scan.
+_EXTENSION_BY_MIME = {
+    "video/x-matroska": ".mkv",
+    "video/mp4": ".mp4",
+    "video/x-msvideo": ".avi",
+    "video/x-m4v": ".m4v",
+    "video/quicktime": ".mov",
+    "video/mp2t": ".ts",
+    "video/webm": ".webm",
+}
+
 
 async def resolve_session():
     """Resolves the Telethon user session source (StringSession or .session file).
@@ -129,6 +142,19 @@ def is_library_media(file_name, mime_type, has_document, is_sticker):
     if mime_type.startswith("video/") or ext in VIDEO_EXTENSIONS:
         return True
     return has_document and not ext and not mime_type.startswith(("image/", "audio/"))
+
+
+def with_video_extension(file_name, mime_type):
+    """file_name with a video extension on the end, added from mime_type if it has none.
+
+    A release sent as "Show.S01E01" or "Movie.2020.1080p" is accepted as library media, and
+    used to be saved under exactly that name - which Jellyfin skips, since it only scans
+    files with a video extension. splitext is no help deciding "has none": it reads
+    ".1080p" and ".2020" as extensions, so only a known video extension counts.
+    """
+    if os.path.splitext(file_name)[1].lower() in VIDEO_EXTENSIONS:
+        return file_name
+    return file_name + _EXTENSION_BY_MIME.get(mime_type.lower(), ".mp4")
 
 
 def is_user_authorized(user_id):
@@ -641,16 +667,18 @@ async def main():
 
             # Direct Video / Large Document Download (ANY SIZE up to 4GB!) - buffered into
             # a batch so a burst of files gets organized as one unit (see confirmation_flow._add_to_batch).
+            mime_type = getattr(event.message.file, "mime_type", "") or ""
             if is_library_media(
                 file_name,
-                getattr(event.message.file, "mime_type", "") or "",
+                mime_type,
                 has_document=getattr(event.message, "document", None) is not None,
                 is_sticker=getattr(event.message, "sticker", None) is not None,
             ):
                 if not file_name:
                     # Named by message id, not by the clock: an album of unnamed videos all
                     # lands in the same second, and they used to share one filename.
-                    file_name = f"telegram_video_{event.message.id}.mp4"
+                    file_name = f"telegram_video_{event.message.id}"
+                file_name = with_video_extension(file_name, mime_type)
 
                 parsed = parse_media_name(file_name)
                 await _add_to_batch(bot_client, user_client, chat_id, event.message, file_name, parsed, target_path)
